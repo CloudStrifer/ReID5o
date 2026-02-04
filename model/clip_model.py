@@ -500,8 +500,21 @@ def convert_weights(model: nn.Module):
                 attr = getattr(l, name)
                 if attr is not None:
                     attr.data = attr.data.half()
+        
+        # Convert Missing-aware Encoding parameters to fp16
+        # These are nn.Parameter objects in ModalityTypeEmbedding, MissingTokenEmbedding, MissingMaskEmbedding
+        for name in ["modality_embeddings", "missing_tokens", "mask_embeddings"]:
+            if hasattr(l, name):
+                attr = getattr(l, name)
+                if attr is not None and isinstance(attr, nn.Parameter):
+                    attr.data = attr.data.half()
 
     model.apply(_convert_weights_to_fp16)
+    
+    # Also convert any remaining parameters in missing_aware_encoder if it exists
+    if hasattr(model, 'missing_aware_encoder'):
+        for name, param in model.missing_aware_encoder.named_parameters():
+            param.data = param.data.half()
 
 
 def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None):

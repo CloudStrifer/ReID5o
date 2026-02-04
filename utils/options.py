@@ -25,6 +25,23 @@ def get_args():
 
     parser.add_argument("--mmt_depth", type=int, default=4, help="for multimodal feature fusion")
 
+    ######################## Missing-aware Robust Encoding settings ########################
+    parser.add_argument("--use_missing_aware", default=True, action='store_true',
+                        help="Enable Missing-aware Robust Encoding for handling arbitrary missing modalities")
+    parser.add_argument("--modality_dropout_prob", type=float, default=0.5,
+                        help="Probability of dropping each non-RGB modality during training")
+    parser.add_argument("--keep_rgb_prob", type=float, default=0.8,
+                        help="Probability of keeping RGB modality (gallery modality, usually higher)")
+    parser.add_argument("--min_modalities_keep", type=int, default=1,
+                        help="Minimum number of modalities to keep during training")
+    parser.add_argument("--consistency_loss_weight", type=float, default=0.5,
+                        help="Weight for consistency loss between full-modal and subset embeddings")
+    parser.add_argument("--consistency_loss_type", type=str, default='cosine',
+                        choices=['l2', 'cosine', 'both'],
+                        help="Type of consistency loss: 'l2', 'cosine', or 'both'")
+    parser.add_argument("--consistency_temperature", type=float, default=0.1,
+                        help="Temperature for cosine consistency loss")
+
     ######################## loss settings ########################
     parser.add_argument("--loss_names", default='mm_sdm+id', help="which loss to use [ 'cmpm', 'itc', 'sdm','pretrain']")
     parser.add_argument("--id_loss_weight", type=float, default=1.0)
@@ -48,7 +65,7 @@ def get_args():
     parser.add_argument("--beta", type=float, default=0.999)
     
     ######################## scheduler ########################
-    parser.add_argument("--num_epoch", type=int, default=1)
+    parser.add_argument("--num_epoch", type=int, default=20)
     parser.add_argument("--milestones", type=int, nargs='+', default=(20,50))
     parser.add_argument("--gamma", type=float, default=0.1)
     parser.add_argument("--warmup_factor", type=float, default=0.1)

@@ -3,9 +3,17 @@ from .clip_model import build_CLIP_from_openai_pretrained, convert_weights, Tran
 import torch
 import copy
 import itertools
+import random
 import torch.nn as nn
+import torch.nn.functional as F
 from collections import OrderedDict
 from .mmencoder_withlora import MMTransformer_withlora
+from .missing_aware_encoding import (
+    MissingAwareEncoder, 
+    MissingAwareModalityAssembler,
+    ConsistencyConstraint,
+    ModalityDropout
+)
 
 ######################ReID5o Model########################
 class VisionTokenizer(nn.Module):
@@ -100,12 +108,72 @@ class ReID5oModel(nn.Module):
 
         if 'id' in args.loss_names:
             self.create_id_classifier()
+        
+        # ============ Missing-aware Robust Encoding ============
+        # Initialize missing-aware encoding components
+        self.use_missing_aware = getattr(args, 'use_missing_aware', False)
+        if self.use_missing_aware:
+            self._init_missing_aware_encoding(args)
 
     def create_id_classifier(self):
         print('num_classes:{}'.format(self.num_classes))
         self.classifier = nn.Linear(self.embed_dim, self.num_classes)
         nn.init.normal_(self.classifier.weight.data, std=0.001)
         nn.init.constant_(self.classifier.bias.data, val=0.0)
+
+    def _init_missing_aware_encoding(self, args):
+        """
+        Initialize Missing-aware Robust Encoding components.
+        
+        This enables the model to handle arbitrary missing modalities by:
+        1. Using learnable missing tokens instead of zeros
+        2. Adding modality type embeddings
+        3. Adding missing mask embeddings
+        4. Applying modality dropout during training
+        """
+        print('Initializing Missing-aware Robust Encoding...')
+        
+        # Calculate vision token count: 1 CLS + grid patches
+        # For 384x128 image with patch size 16: 24x8 = 192 patches, but after reshape: (384/16) * (128/16) = 24 * 8 = 192
+        # Actually for CLIP: grid_h = 384/16 = 24, grid_w = 128/16 = 8, total = 24*8 = 192 + 1 CLS = 193
+        # But based on the code, it seems to use a different calculation
+        grid_h = args.img_size[0] // args.stride_size
+        grid_w = args.img_size[1] // args.stride_size
+        self.vision_num_tokens = grid_h * grid_w + 1  # +1 for CLS token
+        self.text_num_tokens = args.text_length  # 77
+        
+        print(f'Vision tokens: {self.vision_num_tokens}, Text tokens: {self.text_num_tokens}')
+        
+        # Missing-aware encoder for handling missing modalities
+        self.missing_aware_encoder = MissingAwareEncoder(
+            embed_dim=self.embed_dim,
+            num_modalities=5,  # RGB, NIR, CP, SK, TEXT
+            vision_num_tokens=self.vision_num_tokens,
+            text_num_tokens=self.text_num_tokens
+        )
+        
+        # Modality dropout for training robustness
+        self.modality_dropout = ModalityDropout(
+            num_modalities=5,
+            min_keep=getattr(args, 'min_modalities_keep', 1),
+            dropout_prob=getattr(args, 'modality_dropout_prob', 0.5),
+            keep_rgb_prob=getattr(args, 'keep_rgb_prob', 0.8)
+        )
+        
+        # Consistency constraint for aligning full-modal and subset embeddings
+        self.consistency_constraint = ConsistencyConstraint(
+            loss_type=getattr(args, 'consistency_loss_type', 'cosine'),
+            temperature=getattr(args, 'consistency_temperature', 0.1)
+        )
+        
+        # Weight for consistency loss
+        self.consistency_loss_weight = getattr(args, 'consistency_loss_weight', 0.5)
+        
+        print(f'Missing-aware Robust Encoding initialized with:')
+        print(f'  - Modality dropout prob: {getattr(args, "modality_dropout_prob", 0.5)}')
+        print(f'  - Keep RGB prob: {getattr(args, "keep_rgb_prob", 0.8)}')
+        print(f'  - Min modalities keep: {getattr(args, "min_modalities_keep", 1)}')
+        print(f'  - Consistency loss weight: {self.consistency_loss_weight}')
 
     def create_mm_fusion_module(self):
         self.cross_attn = nn.MultiheadAttention(self.embed_dim,
@@ -238,6 +306,208 @@ class ReID5oModel(nn.Module):
         eot,x = self.clip_text_encoder(x,self.dtype)
         return eot,x
 
+    # ============ Missing-aware Encoding Methods ============
+    
+    def encode_rgb_embeds_with_missing_aware(self, x, is_present=True):
+        """Encode RGB with missing-aware information."""
+        if is_present and x is not None:
+            embeds = self.encode_rgb_embeds(x)
+            if self.use_missing_aware:
+                embeds = self.missing_aware_encoder.encode_with_modality_info(
+                    embeds, modality_idx=0, is_present=True
+                )
+            return embeds
+        else:
+            # Return missing tokens for RGB
+            batch_size = x.shape[0] if x is not None else 1
+            device = x.device if x is not None else next(self.parameters()).device
+            return self.missing_aware_encoder.get_missing_tokens(
+                modality_idx=0, batch_size=batch_size, is_text=False,
+                dtype=self.dtype, device=device
+            )
+    
+    def encode_nir_embeds_with_missing_aware(self, x, is_present=True):
+        """Encode NIR with missing-aware information."""
+        if is_present and x is not None:
+            embeds = self.encode_nir_embeds(x)
+            if self.use_missing_aware:
+                embeds = self.missing_aware_encoder.encode_with_modality_info(
+                    embeds, modality_idx=1, is_present=True
+                )
+            return embeds
+        else:
+            batch_size = x.shape[0] if x is not None else 1
+            device = x.device if x is not None else next(self.parameters()).device
+            return self.missing_aware_encoder.get_missing_tokens(
+                modality_idx=1, batch_size=batch_size, is_text=False,
+                dtype=self.dtype, device=device
+            )
+    
+    def encode_cp_embeds_with_missing_aware(self, x, is_present=True):
+        """Encode CP with missing-aware information."""
+        if is_present and x is not None:
+            embeds = self.encode_cp_embeds(x)
+            if self.use_missing_aware:
+                embeds = self.missing_aware_encoder.encode_with_modality_info(
+                    embeds, modality_idx=2, is_present=True
+                )
+            return embeds
+        else:
+            batch_size = x.shape[0] if x is not None else 1
+            device = x.device if x is not None else next(self.parameters()).device
+            return self.missing_aware_encoder.get_missing_tokens(
+                modality_idx=2, batch_size=batch_size, is_text=False,
+                dtype=self.dtype, device=device
+            )
+    
+    def encode_sk_embeds_with_missing_aware(self, x, is_present=True):
+        """Encode SK with missing-aware information."""
+        if is_present and x is not None:
+            embeds = self.encode_sk_embeds(x)
+            if self.use_missing_aware:
+                embeds = self.missing_aware_encoder.encode_with_modality_info(
+                    embeds, modality_idx=3, is_present=True
+                )
+            return embeds
+        else:
+            batch_size = x.shape[0] if x is not None else 1
+            device = x.device if x is not None else next(self.parameters()).device
+            return self.missing_aware_encoder.get_missing_tokens(
+                modality_idx=3, batch_size=batch_size, is_text=False,
+                dtype=self.dtype, device=device
+            )
+    
+    def encode_text_embeds_with_missing_aware(self, x, is_present=True):
+        """Encode Text with missing-aware information."""
+        if is_present and x is not None:
+            eot, embeds = self.encode_text_embeds(x)
+            if self.use_missing_aware:
+                embeds = self.missing_aware_encoder.encode_with_modality_info(
+                    embeds, modality_idx=4, is_present=True
+                )
+            return eot, embeds
+        else:
+            batch_size = x.shape[0] if x is not None else 1
+            device = x.device if x is not None else next(self.parameters()).device
+            missing_embeds = self.missing_aware_encoder.get_missing_tokens(
+                modality_idx=4, batch_size=batch_size, is_text=True,
+                dtype=self.dtype, device=device
+            )
+            # For missing text, use mean of missing tokens as EOT
+            missing_eot = missing_embeds.mean(dim=1)
+            return missing_eot, missing_embeds
+    
+    def sample_modality_dropout(self):
+        """
+        Sample a modality dropout mask for training.
+        Returns a list of booleans [RGB, NIR, CP, SK, TEXT] indicating which modalities to use.
+        """
+        if self.use_missing_aware and self.training:
+            return self.modality_dropout(training=True)
+        return [True, True, True, True, True]  # All present during evaluation
+    
+    def router_multimodal_embeds_with_missing_aware(self, rgb, nir, cp, sk, text, modality_mask=None):
+        """
+        Route multi-modal embeddings with missing-awareness.
+        
+        When modality_mask is provided, missing modalities are replaced with 
+        learnable missing tokens instead of being omitted.
+        
+        Args:
+            rgb, nir, cp, sk, text: Input tensors for each modality
+            modality_mask: List of booleans [RGB, NIR, CP, SK, TEXT] indicating presence
+            
+        Returns:
+            Same structure as router_multimodal_embeds but with missing-aware handling
+        """
+        if modality_mask is None:
+            modality_mask = [True, True, True, True, True]
+        
+        # Get batch size
+        batch_size = rgb.shape[0]
+        
+        # Encode each modality with missing-awareness
+        if modality_mask[0]:  # RGB
+            rgb_embeds = self.encode_rgb_embeds_with_missing_aware(rgb, is_present=True)
+        else:
+            rgb_embeds = self.encode_rgb_embeds_with_missing_aware(rgb, is_present=False)
+        
+        if modality_mask[1]:  # NIR
+            nir_embeds = self.encode_nir_embeds_with_missing_aware(nir, is_present=True)
+        else:
+            nir_embeds = self.encode_nir_embeds_with_missing_aware(nir, is_present=False)
+        
+        if modality_mask[2]:  # CP
+            cp_embeds = self.encode_cp_embeds_with_missing_aware(cp, is_present=True)
+        else:
+            cp_embeds = self.encode_cp_embeds_with_missing_aware(cp, is_present=False)
+        
+        if modality_mask[3]:  # SK
+            sk_embeds = self.encode_sk_embeds_with_missing_aware(sk, is_present=True)
+        else:
+            sk_embeds = self.encode_sk_embeds_with_missing_aware(sk, is_present=False)
+        
+        if modality_mask[4]:  # TEXT
+            text_eot, text_embeds = self.encode_text_embeds_with_missing_aware(text, is_present=True)
+        else:
+            text_eot, text_embeds = self.encode_text_embeds_with_missing_aware(text, is_present=False)
+        
+        # Ensure all embeddings are in the model's dtype (half precision)
+        # This is critical for compatibility with CLIP's FP16 model
+        rgb_embeds = rgb_embeds.to(self.dtype)
+        nir_embeds = nir_embeds.to(self.dtype)
+        cp_embeds = cp_embeds.to(self.dtype)
+        sk_embeds = sk_embeds.to(self.dtype)
+        text_embeds = text_embeds.to(self.dtype)
+        text_eot = text_eot.to(self.dtype)
+        
+        # For single modality embeddings, use CLS token (index 0)
+        mm_embeds = [nir_embeds, cp_embeds, sk_embeds, text_embeds]
+        combined_embeds_for_one = [
+            rgb_embeds[:, 0, :].float(),
+            nir_embeds[:, 0, :].float(),
+            cp_embeds[:, 0, :].float(),
+            sk_embeds[:, 0, :].float(),
+            text_eot.float()
+        ]
+        
+        # Generate combinations for two, three, and four modalities
+        combinations_for_two = itertools.combinations(mm_embeds, 2)
+        combined_embeds_for_two = []
+        for combo in combinations_for_two:
+            combined = torch.cat(combo, dim=1)
+            combined_embeds_for_two.append(combined)
+        
+        combinations_for_three = itertools.combinations(mm_embeds, 3)
+        combined_embeds_for_three = []
+        for combo in combinations_for_three:
+            combined = torch.cat(combo, dim=1)
+            combined_embeds_for_three.append(combined)
+        
+        combined_embeds_for_four = [torch.cat(mm_embeds, dim=1)]
+        
+        return combined_embeds_for_one, combined_embeds_for_two, combined_embeds_for_three, combined_embeds_for_four
+    
+    def compute_consistency_loss(self, full_modal_embeds, subset_embeds_list):
+        """
+        Compute consistency loss between full-modal and subset embeddings.
+        
+        Args:
+            full_modal_embeds: Embeddings from full modality input (batch_size, embed_dim)
+            subset_embeds_list: List of embeddings from different subsets
+            
+        Returns:
+            Consistency loss scalar
+        """
+        if not self.use_missing_aware:
+            return torch.tensor(0.0, device=full_modal_embeds.device)
+        
+        total_loss = 0.0
+        for subset_embeds in subset_embeds_list:
+            total_loss += self.consistency_constraint(full_modal_embeds, subset_embeds)
+        
+        return total_loss / len(subset_embeds_list) if subset_embeds_list else torch.tensor(0.0)
+
     def router_multimodal_embeds(self,rgb,nir,cp,sk,text):
         rgb_embeds = self.encode_rgb_embeds(rgb)
         nir_embeds = self.encode_nir_embeds(nir)
@@ -263,7 +533,7 @@ class ReID5oModel(nn.Module):
 
         return combined_embeds_for_one,combined_embeds_for_two,combined_embeds_for_three,combined_embeds_for_four
 
-    def forward(self, batch):
+    def forward(self, batch, use_modality_dropout=None):
         ret = dict()
         rgbs = batch['rgbs']
         nirs = batch['nirs']
@@ -272,9 +542,41 @@ class ReID5oModel(nn.Module):
         texts = batch['caption_ids']
         logit_scale = self.logit_scale
         ret.update({'temperature': 1 / logit_scale})
+        
+        # Determine whether to use modality dropout
+        if use_modality_dropout is None:
+            use_modality_dropout = self.training and self.use_missing_aware
 
         if 'mm_sdm' in self.current_task:
-            cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = self.router_multimodal_embeds(rgbs,nirs,cps,sks,texts)
+            # ============ Missing-aware Robust Encoding Integration ============
+            if self.use_missing_aware and use_modality_dropout:
+                # Step 1: Get full-modal embeddings (for consistency loss)
+                full_cone_embeds, full_ctwo_embeds, full_cthree_embeds, full_cfour_embeds = \
+                    self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts, 
+                                                                      modality_mask=[True, True, True, True, True])
+                
+                # Step 2: Apply modality dropout and get subset embeddings
+                modality_mask = self.sample_modality_dropout()
+                subset_cone_embeds, subset_ctwo_embeds, subset_cthree_embeds, subset_cfour_embeds = \
+                    self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts,
+                                                                      modality_mask=modality_mask)
+                
+                # Use the subset embeddings for main training
+                cone_embeds = subset_cone_embeds
+                ctwo_embeds = subset_ctwo_embeds
+                cthree_embeds = subset_cthree_embeds
+                cfour_embeds = subset_cfour_embeds
+                
+                # Store full-modal embeddings for consistency loss
+                ret.update({'modality_mask': modality_mask})
+            else:
+                # Standard processing without modality dropout
+                if self.use_missing_aware:
+                    cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                        self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts)
+                else:
+                    cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                        self.router_multimodal_embeds(rgbs, nirs, cps, sks, texts)
 
             cone_feats = cone_embeds
             ctwo_feats,cthree_feats,cfour_feats = [],[],[]
@@ -320,6 +622,66 @@ class ReID5oModel(nn.Module):
             ret.update({'ctwo_mmsdm_loss': ctwo_aver_loss})
             ret.update({'cthree_mmsdm_loss': cthree_aver_loss})
             ret.update({'cfour_mmsdm_loss': cfour_aver_loss})
+            
+            # ============ Consistency Loss for Missing-aware Encoding ============
+            if self.use_missing_aware and use_modality_dropout and self.training:
+                # Compute full-modal features for consistency loss
+                full_cone_feats = full_cone_embeds
+                full_ctwo_feats, full_cthree_feats, full_cfour_feats = [], [], []
+                
+                for i in range(len(full_ctwo_embeds)):
+                    full_ctwo_embed = full_ctwo_embeds[i]
+                    full_ctwo_feat = self.mm_fusion(full_ctwo_embed, full_ctwo_embed, full_ctwo_embed)
+                    full_ctwo_feats.append(full_ctwo_feat)
+                
+                for i in range(len(full_cthree_embeds)):
+                    full_cthree_embed = full_cthree_embeds[i]
+                    full_cthree_feat = self.mm_fusion(full_cthree_embed, full_cthree_embed, full_cthree_embed)
+                    full_cthree_feats.append(full_cthree_feat)
+                
+                for i in range(len(full_cfour_embeds)):
+                    full_cfour_embed = full_cfour_embeds[i]
+                    full_cfour_feat = self.mm_fusion(full_cfour_embed, full_cfour_embed, full_cfour_embed)
+                    full_cfour_feats.append(full_cfour_feat)
+                
+                # Full RGB feature
+                full_rgb_feat = full_cone_feats[0]
+                
+                # Compute consistency loss: align subset features with full-modal features
+                consistency_losses = []
+                
+                # Consistency for RGB
+                consistency_losses.append(
+                    self.consistency_constraint(full_rgb_feat, rgb_feat)
+                )
+                
+                # Consistency for single modalities
+                full_cone_feats_rest = full_cone_feats[1:]
+                for full_feat, subset_feat in zip(full_cone_feats_rest, cone_feats):
+                    consistency_losses.append(
+                        self.consistency_constraint(full_feat, subset_feat)
+                    )
+                
+                # Consistency for two-modal combinations
+                for full_feat, subset_feat in zip(full_ctwo_feats, ctwo_feats):
+                    consistency_losses.append(
+                        self.consistency_constraint(full_feat, subset_feat)
+                    )
+                
+                # Consistency for three-modal combinations
+                for full_feat, subset_feat in zip(full_cthree_feats, cthree_feats):
+                    consistency_losses.append(
+                        self.consistency_constraint(full_feat, subset_feat)
+                    )
+                
+                # Consistency for four-modal combinations
+                for full_feat, subset_feat in zip(full_cfour_feats, cfour_feats):
+                    consistency_losses.append(
+                        self.consistency_constraint(full_feat, subset_feat)
+                    )
+                
+                consistency_loss = torch.mean(torch.stack(consistency_losses))
+                ret.update({'consistency_loss': consistency_loss * self.consistency_loss_weight})
 
             if 'id' in self.current_task:
                 all_feats = [rgb_feat] + cone_feats + ctwo_feats + cthree_feats + cfour_feats
@@ -332,7 +694,13 @@ class ReID5oModel(nn.Module):
                 return ret
 
         if 'mm_itc' in self.current_task:
-            cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = self.router_multimodal_embeds(rgbs,nirs,cps,sks,texts)
+            # Missing-aware encoding for mm_itc
+            if self.use_missing_aware:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts)
+            else:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds(rgbs, nirs, cps, sks, texts)
 
             cone_feats = cone_embeds
             ctwo_feats,cthree_feats,cfour_feats = [],[],[]
@@ -381,7 +749,13 @@ class ReID5oModel(nn.Module):
             return ret
 
         if 'mm_supitc' in self.current_task:
-            cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = self.router_multimodal_embeds(rgbs,nirs,cps,sks,texts)
+            # Missing-aware encoding for mm_supitc
+            if self.use_missing_aware:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts)
+            else:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds(rgbs, nirs, cps, sks, texts)
 
             cone_feats = cone_embeds
             ctwo_feats,cthree_feats,cfour_feats = [],[],[]
@@ -430,7 +804,13 @@ class ReID5oModel(nn.Module):
             return ret
 
         if 'mm_cmpm' in self.current_task:
-            cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = self.router_multimodal_embeds(rgbs,nirs,cps,sks,texts)
+            # Missing-aware encoding for mm_cmpm
+            if self.use_missing_aware:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds_with_missing_aware(rgbs, nirs, cps, sks, texts)
+            else:
+                cone_embeds, ctwo_embeds, cthree_embeds, cfour_embeds = \
+                    self.router_multimodal_embeds(rgbs, nirs, cps, sks, texts)
 
             cone_feats = cone_embeds
             ctwo_feats,cthree_feats,cfour_feats = [],[],[]

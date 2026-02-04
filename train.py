@@ -31,6 +31,10 @@ TENSORBOARD_AVAILABLE = True
 def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, checkpointer, tensorboard_writer=None):
     """
     Train for one epoch
+    
+    Supports Missing-aware Robust Encoding when args.use_missing_aware is True:
+    - Applies modality dropout during training
+    - Computes consistency loss between full-modal and subset embeddings
     """
     logger = logging.getLogger("ORBench.train")
     device = next(model.parameters()).device
@@ -42,6 +46,12 @@ def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, chec
     batch_time = AverageMeter()
     data_time = AverageMeter()
     
+    # Track modality dropout statistics if enabled
+    use_missing_aware = getattr(args, 'use_missing_aware', False)
+    if use_missing_aware:
+        modality_presence_counts = {'RGB': 0, 'NIR': 0, 'CP': 0, 'SK': 0, 'TEXT': 0}
+        total_batches = 0
+    
     end = time.time()
     
     for iteration, batch in enumerate(train_loader):
@@ -52,8 +62,17 @@ def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, chec
             if torch.is_tensor(batch[key]):
                 batch[key] = batch[key].to(device)
         
-        # Forward pass
+        # Forward pass (modality dropout is handled inside the model)
         ret = model(batch)
+        
+        # Track modality presence if using missing-aware encoding
+        if use_missing_aware and 'modality_mask' in ret:
+            modality_mask = ret['modality_mask']
+            modality_names = ['RGB', 'NIR', 'CP', 'SK', 'TEXT']
+            for i, present in enumerate(modality_mask):
+                if present:
+                    modality_presence_counts[modality_names[i]] += 1
+            total_batches += 1
         
         # Aggregate losses
         total_loss = 0
@@ -94,6 +113,13 @@ def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, chec
                 tensorboard_writer.add_scalar('Train/Learning_Rate', scheduler.get_last_lr()[0], global_step)
                 for loss_name, meter in loss_meters.items():
                     tensorboard_writer.add_scalar(f'Train/{loss_name}', meter.val, global_step)
+    
+    # Log modality dropout statistics at end of epoch
+    if use_missing_aware and total_batches > 0:
+        logger.info("Modality Presence Statistics (Missing-aware Encoding):")
+        for modality, count in modality_presence_counts.items():
+            presence_rate = count / total_batches * 100
+            logger.info(f"  {modality}: {presence_rate:.1f}% present")
     
     return loss_meters
 
@@ -185,6 +211,17 @@ def main():
     logger.info("Building model...")
     model = build_model(args, num_classes=num_classes)
     model.to(device)
+    
+    # Log Missing-aware Robust Encoding configuration
+    if getattr(args, 'use_missing_aware', False):
+        logger.info("=" * 50)
+        logger.info("Missing-aware Robust Encoding ENABLED")
+        logger.info(f"  Modality dropout prob: {getattr(args, 'modality_dropout_prob', 0.5)}")
+        logger.info(f"  Keep RGB prob: {getattr(args, 'keep_rgb_prob', 0.8)}")
+        logger.info(f"  Min modalities keep: {getattr(args, 'min_modalities_keep', 1)}")
+        logger.info(f"  Consistency loss weight: {getattr(args, 'consistency_loss_weight', 0.5)}")
+        logger.info(f"  Consistency loss type: {getattr(args, 'consistency_loss_type', 'cosine')}")
+        logger.info("=" * 50)
     
     # Build optimizer
     logger.info("Building optimizer...")

@@ -45,7 +45,7 @@ class Evaluator():
         self.get_mAP = get_mAP
         self.logger = logging.getLogger("ORBench.eval")
 
-        # Define modality encoding methods
+        # Define modality encoding methods (standard)
         self.modality_encoders = {
             'nir': 'encode_nir_cls',
             'cp': 'encode_cp_cls',
@@ -59,24 +59,46 @@ class Evaluator():
             'sk': 'encode_sk_embeds',
             'text': 'encode_text_embeds'
         }
+        
+        # Define modality encoding methods (missing-aware)
+        self.modality_embed_encoders_missing_aware = {
+            'nir': 'encode_nir_embeds_with_missing_aware',
+            'cp': 'encode_cp_embeds_with_missing_aware',
+            'sk': 'encode_sk_embeds_with_missing_aware',
+            'text': 'encode_text_embeds_with_missing_aware'
+        }
 
     def _extract_single_modality_features(self, model, loader, modality):
         """Extract features for single modality"""
         model = model.eval()
         device = next(model.parameters()).device
         qids, qfeats = [], []
+        
+        # Check if model uses missing-aware encoding
+        use_missing_aware = getattr(model, 'use_missing_aware', False)
 
         for pid, img in loader:
             img = img.to(device)
             with torch.no_grad():
-                encoder_method = getattr(model, self.modality_encoders[modality])
-                img_feat = encoder_method(img)
+                if use_missing_aware:
+                    # Use missing-aware encoding: extract CLS token from embeddings
+                    encoder_method = getattr(model, self.modality_embed_encoders_missing_aware[modality])
+                    if modality == 'text':
+                        img_feat, _ = encoder_method(img, is_present=True)
+                        img_feat = img_feat.float()  # Ensure float32
+                    else:
+                        embeds = encoder_method(img, is_present=True)
+                        img_feat = embeds[:, 0, :].float()  # CLS token, ensure float32
+                else:
+                    encoder_method = getattr(model, self.modality_encoders[modality])
+                    img_feat = encoder_method(img)
+                    img_feat = img_feat.float()  # Ensure float32
             qids.append(pid.view(-1))
             qfeats.append(img_feat)
 
         qids = torch.cat(qids, 0)
         qfeats = torch.cat(qfeats, 0)
-        qfeats = F.normalize(qfeats, p=2, dim=1)
+        qfeats = F.normalize(qfeats.float(), p=2, dim=1)  # Ensure float32
 
         return qids, qfeats
 
@@ -88,6 +110,12 @@ class Evaluator():
 
         # Determine the number of images based on modalities count
         num_modalities = len(modalities)
+        
+        # Check if model uses missing-aware encoding
+        use_missing_aware = getattr(model, 'use_missing_aware', False)
+        
+        # Get model dtype for proper embedding conversion (half precision for CLIP)
+        model_dtype = getattr(model, 'dtype', torch.float16)
 
         for batch in loader:
             pid = batch[0]
@@ -96,18 +124,28 @@ class Evaluator():
             with torch.no_grad():
                 embeds = []
                 for i, modality in enumerate(modalities):
-                    encoder_method = getattr(model, self.modality_embed_encoders[modality])
-
-                    if modality == 'text':
-                        # Text encoding returns tuple, we take the second element
-                        _, text_embed = encoder_method(imgs[i])
-                        embeds.append(text_embed)
+                    if use_missing_aware:
+                        encoder_method = getattr(model, self.modality_embed_encoders_missing_aware[modality])
+                        if modality == 'text':
+                            # Text encoding returns tuple with missing-aware
+                            _, text_embed = encoder_method(imgs[i], is_present=True)
+                            embeds.append(text_embed.to(dtype=model_dtype))
+                        else:
+                            embed = encoder_method(imgs[i], is_present=True)
+                            embeds.append(embed.to(dtype=model_dtype))
                     else:
-                        embed = encoder_method(imgs[i])
-                        embeds.append(embed)
+                        encoder_method = getattr(model, self.modality_embed_encoders[modality])
+                        if modality == 'text':
+                            # Text encoding returns tuple, we take the second element
+                            _, text_embed = encoder_method(imgs[i])
+                            embeds.append(text_embed.to(dtype=model_dtype))
+                        else:
+                            embed = encoder_method(imgs[i])
+                            embeds.append(embed.to(dtype=model_dtype))
 
                 # Concatenate all embeddings and fuse
-                combined = torch.cat(embeds, dim=1)
+                # Ensure combined tensor is in model dtype (half precision)
+                combined = torch.cat(embeds, dim=1).to(dtype=model_dtype)
                 fusion_feats = model.mm_fusion(combined, combined, combined)
 
             qids.append(pid.view(-1))
@@ -115,7 +153,7 @@ class Evaluator():
 
         qids = torch.cat(qids, 0)
         qfeats = torch.cat(qfeats, 0)
-        qfeats = F.normalize(qfeats, p=2, dim=1)
+        qfeats = F.normalize(qfeats.float(), p=2, dim=1)  # Ensure float32
 
         return qids, qfeats
 
@@ -126,6 +164,9 @@ class Evaluator():
         else:
             qids, qfeats = self._extract_multi_modality_features(model, loader, modalities)
 
+        # Ensure both tensors are in float32 for similarity computation
+        qfeats = qfeats.float()
+        gfeats = gfeats.float()
         similarity = qfeats @ gfeats.t()
         t2i_cmc, t2i_mAP, t2i_mINP, _ = rank(
             similarity=similarity,
