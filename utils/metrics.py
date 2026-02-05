@@ -69,13 +69,15 @@ class Evaluator():
         }
 
     def _extract_single_modality_features(self, model, loader, modality):
-        """Extract features for single modality"""
+        """Extract features for single modality, with optional cross-modal completion"""
         model = model.eval()
         device = next(model.parameters()).device
         qids, qfeats = [], []
         
-        # Check if model uses missing-aware encoding
+        # Check if model uses missing-aware encoding and cross-modal completion
         use_missing_aware = getattr(model, 'use_missing_aware', False)
+        use_completion = getattr(model, 'use_cross_modal_completion', False) and \
+                         getattr(model, 'use_completion_inference', False)
 
         for pid, img in loader:
             img = img.to(device)
@@ -89,6 +91,29 @@ class Evaluator():
                     else:
                         embeds = encoder_method(img, is_present=True)
                         img_feat = embeds[:, 0, :].float()  # CLS token, ensure float32
+                    
+                    # If using cross-modal completion, enhance features with generated RGB
+                    if use_completion and modality != 'rgb':
+                        # Generate RGB feature from this modality
+                        modality_name_map = {'nir': 'NIR', 'cp': 'CP', 'sk': 'SK', 'text': 'TEXT'}
+                        modality_mask = [False, False, False, False, False]
+                        modality_idx_map = {'nir': 1, 'cp': 2, 'sk': 3, 'text': 4}
+                        modality_mask[modality_idx_map[modality]] = True
+                        
+                        available_features = {modality_name_map[modality]: img_feat}
+                        
+                        # Complete with RGB feature
+                        try:
+                            completed = model.complete_missing_features(
+                                available_features, modality_mask
+                            )
+                            # Use both original and generated RGB for enhanced matching
+                            if 'RGB' in completed:
+                                generated_rgb = completed['RGB'].float()
+                                # Combine original feature with generated RGB (weighted average)
+                                img_feat = 0.7 * img_feat + 0.3 * generated_rgb
+                        except Exception:
+                            pass  # Fall back to original feature if completion fails
                 else:
                     encoder_method = getattr(model, self.modality_encoders[modality])
                     img_feat = encoder_method(img)

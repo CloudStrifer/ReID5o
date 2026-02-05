@@ -1,4 +1,5 @@
-from model import objectives
+#from model import objectives
+from . import objectives
 from .clip_model import build_CLIP_from_openai_pretrained, convert_weights, Transformer, LayerNorm ,QuickGELU
 import torch
 import copy
@@ -7,12 +8,20 @@ import random
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from typing import Dict, List, Optional, Tuple
 from .mmencoder_withlora import MMTransformer_withlora
 from .missing_aware_encoding import (
     MissingAwareEncoder, 
     MissingAwareModalityAssembler,
     ConsistencyConstraint,
     ModalityDropout
+)
+from .cross_modal_completion import (
+    CrossModalCompletionModule,
+    CrossModalCompletionTrainer,
+    InferenceCompletionHelper,
+    FeatureReconstructionLoss,
+    CycleConsistencyLoss
 )
 
 ######################ReID5o Model########################
@@ -114,6 +123,12 @@ class ReID5oModel(nn.Module):
         self.use_missing_aware = getattr(args, 'use_missing_aware', False)
         if self.use_missing_aware:
             self._init_missing_aware_encoding(args)
+        
+        # ============ Cross-modal Feature Completion ============
+        # Initialize cross-modal completion components
+        self.use_cross_modal_completion = getattr(args, 'use_cross_modal_completion', False)
+        if self.use_cross_modal_completion:
+            self._init_cross_modal_completion(args)
 
     def create_id_classifier(self):
         print('num_classes:{}'.format(self.num_classes))
@@ -174,6 +189,50 @@ class ReID5oModel(nn.Module):
         print(f'  - Keep RGB prob: {getattr(args, "keep_rgb_prob", 0.8)}')
         print(f'  - Min modalities keep: {getattr(args, "min_modalities_keep", 1)}')
         print(f'  - Consistency loss weight: {self.consistency_loss_weight}')
+
+    def _init_cross_modal_completion(self, args):
+        """
+        Initialize Cross-modal Feature Completion components.
+        
+        This module generates pseudo-features for missing modalities using
+        features from available modalities. It enables "information recovery"
+        rather than just surviving with missing modalities.
+        """
+        print('Initializing Cross-modal Feature Completion...')
+        
+        # Cross-modal completion module
+        self.completion_module = CrossModalCompletionModule(
+            embed_dim=self.embed_dim,
+            num_modalities=5,  # RGB, NIR, CP, SK, TEXT
+            num_heads=getattr(args, 'completion_num_heads', 8),
+            num_layers=getattr(args, 'completion_num_layers', 2),
+            dropout=getattr(args, 'completion_dropout', 0.1)
+        )
+        
+        # Training helper for completion
+        self.completion_trainer = CrossModalCompletionTrainer(
+            completion_module=self.completion_module,
+            reconstruction_loss_weight=getattr(args, 'completion_recon_loss_weight', 1.0),
+            cycle_loss_weight=getattr(args, 'completion_cycle_loss_weight', 0.5),
+            loss_type=getattr(args, 'completion_loss_type', 'cosine')
+        )
+        
+        # Inference helper
+        self.completion_inference = InferenceCompletionHelper(self.completion_module)
+        
+        # Whether to use completion during inference
+        self.use_completion_inference = getattr(args, 'use_completion_inference', True)
+        
+        # Store weights
+        self.completion_recon_loss_weight = getattr(args, 'completion_recon_loss_weight', 1.0)
+        self.completion_cycle_loss_weight = getattr(args, 'completion_cycle_loss_weight', 0.5)
+        
+        print(f'Cross-modal Feature Completion initialized with:')
+        print(f'  - Num heads: {getattr(args, "completion_num_heads", 8)}')
+        print(f'  - Num layers: {getattr(args, "completion_num_layers", 2)}')
+        print(f'  - Reconstruction loss weight: {self.completion_recon_loss_weight}')
+        print(f'  - Cycle loss weight: {self.completion_cycle_loss_weight}')
+        print(f'  - Use completion during inference: {self.use_completion_inference}')
 
     def create_mm_fusion_module(self):
         self.cross_attn = nn.MultiheadAttention(self.embed_dim,
@@ -508,6 +567,108 @@ class ReID5oModel(nn.Module):
         
         return total_loss / len(subset_embeds_list) if subset_embeds_list else torch.tensor(0.0)
 
+    # ============ Cross-modal Feature Completion Methods ============
+    
+    def extract_cls_features(self, rgb, nir, cp, sk, text) -> Dict[str, torch.Tensor]:
+        """
+        Extract CLS-level features for all modalities.
+        Used for cross-modal completion training and inference.
+        
+        Returns:
+            Dict mapping modality names to CLS features (batch_size, embed_dim)
+        """
+        features = {}
+        
+        # Encode each modality and get CLS token
+        rgb_embeds = self.encode_rgb_embeds(rgb)
+        features['RGB'] = rgb_embeds[:, 0, :].float()
+        
+        nir_embeds = self.encode_nir_embeds(nir)
+        features['NIR'] = nir_embeds[:, 0, :].float()
+        
+        cp_embeds = self.encode_cp_embeds(cp)
+        features['CP'] = cp_embeds[:, 0, :].float()
+        
+        sk_embeds = self.encode_sk_embeds(sk)
+        features['SK'] = sk_embeds[:, 0, :].float()
+        
+        text_eot, _ = self.encode_text_embeds(text)
+        features['TEXT'] = text_eot.float()
+        
+        return features
+    
+    def compute_completion_losses(self, 
+                                   modality_features: Dict[str, torch.Tensor],
+                                   compute_cycle: bool = True) -> Dict[str, torch.Tensor]:
+        """
+        Compute cross-modal completion losses for training.
+        
+        Args:
+            modality_features: Dict of real modality features (CLS tokens)
+            compute_cycle: Whether to compute cycle consistency loss
+            
+        Returns:
+            Dict of completion-related losses
+        """
+        if not self.use_cross_modal_completion:
+            device = next(iter(modality_features.values())).device
+            return {
+                'completion_recon_loss': torch.tensor(0.0, device=device),
+                'completion_cycle_loss': torch.tensor(0.0, device=device)
+            }
+        
+        return self.completion_trainer(modality_features, compute_cycle=compute_cycle)
+    
+    def complete_missing_features(self,
+                                    available_features: Dict[str, torch.Tensor],
+                                    modality_mask: List[bool]) -> Dict[str, torch.Tensor]:
+        """
+        Generate pseudo-features for missing modalities during inference.
+        
+        Args:
+            available_features: Dict of available real features
+            modality_mask: List indicating which modalities are present
+            
+        Returns:
+            Complete feature dict with both real and generated features
+        """
+        if not self.use_cross_modal_completion:
+            return available_features
+        
+        return self.completion_inference.complete_for_inference(
+            available_features, modality_mask
+        )
+    
+    def get_completed_single_modality_features(self,
+                                                 modality_features: Dict[str, torch.Tensor],
+                                                 modality_mask: List[bool]) -> List[torch.Tensor]:
+        """
+        Get single-modality features with completion for missing modalities.
+        
+        During inference, if a modality is missing, we generate its feature
+        from available modalities.
+        
+        Args:
+            modality_features: Dict of available features
+            modality_mask: List indicating which modalities are present
+            
+        Returns:
+            List of features [RGB, NIR, CP, SK, TEXT] with generated features for missing ones
+        """
+        if not self.use_cross_modal_completion or not self.use_completion_inference:
+            # Return available features, None for missing
+            modality_names = ['RGB', 'NIR', 'CP', 'SK', 'TEXT']
+            return [
+                modality_features.get(name, None) 
+                for name, present in zip(modality_names, modality_mask)
+            ]
+        
+        # Complete missing features
+        complete_features = self.complete_missing_features(modality_features, modality_mask)
+        
+        modality_names = ['RGB', 'NIR', 'CP', 'SK', 'TEXT']
+        return [complete_features.get(name) for name in modality_names]
+
     def router_multimodal_embeds(self,rgb,nir,cp,sk,text):
         rgb_embeds = self.encode_rgb_embeds(rgb)
         nir_embeds = self.encode_nir_embeds(nir)
@@ -682,6 +843,30 @@ class ReID5oModel(nn.Module):
                 
                 consistency_loss = torch.mean(torch.stack(consistency_losses))
                 ret.update({'consistency_loss': consistency_loss * self.consistency_loss_weight})
+            
+            # ============ Cross-modal Feature Completion Loss ============
+            if self.use_cross_modal_completion and self.training:
+                # Extract CLS features for completion training
+                # Use the full-modal CLS features (from full_cone_embeds if available, else extract fresh)
+                if self.use_missing_aware and use_modality_dropout:
+                    # We already have full-modal features
+                    modality_cls_features = {
+                        'RGB': full_cone_embeds[0],  # full_cone_embeds = [rgb, nir, cp, sk, text_eot]
+                        'NIR': full_cone_embeds[1],
+                        'CP': full_cone_embeds[2],
+                        'SK': full_cone_embeds[3],
+                        'TEXT': full_cone_embeds[4]
+                    }
+                else:
+                    # Extract fresh CLS features
+                    modality_cls_features = self.extract_cls_features(rgbs, nirs, cps, sks, texts)
+                
+                # Compute completion losses (reconstruction + cycle consistency)
+                completion_losses = self.compute_completion_losses(
+                    modality_cls_features, 
+                    compute_cycle=True
+                )
+                ret.update(completion_losses)
 
             if 'id' in self.current_task:
                 all_feats = [rgb_feat] + cone_feats + ctwo_feats + cthree_feats + cfour_feats

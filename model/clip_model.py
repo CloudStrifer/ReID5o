@@ -515,6 +515,16 @@ def convert_weights(model: nn.Module):
     if hasattr(model, 'missing_aware_encoder'):
         for name, param in model.missing_aware_encoder.named_parameters():
             param.data = param.data.half()
+    
+    # Convert Cross-modal Feature Completion module parameters to fp16
+    if hasattr(model, 'completion_module'):
+        for name, param in model.completion_module.named_parameters():
+            param.data = param.data.half()
+    
+    # Also convert completion_trainer parameters if it exists
+    if hasattr(model, 'completion_trainer'):
+        for name, param in model.completion_trainer.named_parameters():
+            param.data = param.data.half()
 
 
 def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None):

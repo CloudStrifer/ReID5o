@@ -8,3 +8,12 @@ from .missing_aware_encoding import (
     MissingTokenEmbedding,
     MissingMaskEmbedding
 )
+from .cross_modal_completion import (
+    CrossModalCompletionModule,
+    CrossModalCompletionTrainer,
+    InferenceCompletionHelper,
+    FeatureReconstructionLoss,
+    CycleConsistencyLoss,
+    ModalityFeatureGenerator,
+    CrossAttentionBlock
+)

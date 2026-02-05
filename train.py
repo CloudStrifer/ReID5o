@@ -223,6 +223,19 @@ def main():
         logger.info(f"  Consistency loss type: {getattr(args, 'consistency_loss_type', 'cosine')}")
         logger.info("=" * 50)
     
+    # Log Cross-modal Feature Completion configuration
+    if getattr(args, 'use_cross_modal_completion', False):
+        logger.info("=" * 50)
+        logger.info("Cross-modal Feature Completion ENABLED")
+        logger.info(f"  Num heads: {getattr(args, 'completion_num_heads', 8)}")
+        logger.info(f"  Num layers: {getattr(args, 'completion_num_layers', 2)}")
+        logger.info(f"  Dropout: {getattr(args, 'completion_dropout', 0.1)}")
+        logger.info(f"  Reconstruction loss weight: {getattr(args, 'completion_recon_loss_weight', 1.0)}")
+        logger.info(f"  Cycle loss weight: {getattr(args, 'completion_cycle_loss_weight', 0.5)}")
+        logger.info(f"  Loss type: {getattr(args, 'completion_loss_type', 'cosine')}")
+        logger.info(f"  Use during inference: {getattr(args, 'use_completion_inference', True)}")
+        logger.info("=" * 50)
+    
     # Build optimizer
     logger.info("Building optimizer...")
     optimizer = build_optimizer(args, model)

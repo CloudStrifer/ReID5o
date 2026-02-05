@@ -42,6 +42,25 @@ def get_args():
     parser.add_argument("--consistency_temperature", type=float, default=0.1,
                         help="Temperature for cosine consistency loss")
 
+    ######################## Cross-modal Feature Completion settings ########################
+    parser.add_argument("--use_cross_modal_completion", default=True, action='store_true',
+                        help="Enable Cross-modal Feature Completion for generating missing modality features")
+    parser.add_argument("--completion_num_heads", type=int, default=8,
+                        help="Number of attention heads in completion generators")
+    parser.add_argument("--completion_num_layers", type=int, default=2,
+                        help="Number of layers in each completion generator")
+    parser.add_argument("--completion_dropout", type=float, default=0.1,
+                        help="Dropout rate in completion module")
+    parser.add_argument("--completion_recon_loss_weight", type=float, default=1.0,
+                        help="Weight for reconstruction loss in completion training")
+    parser.add_argument("--completion_cycle_loss_weight", type=float, default=0.5,
+                        help="Weight for cycle consistency loss in completion training")
+    parser.add_argument("--completion_loss_type", type=str, default='cosine',
+                        choices=['l2', 'l1', 'cosine', 'combined'],
+                        help="Type of loss for completion: 'l2', 'l1', 'cosine', or 'combined'")
+    parser.add_argument("--use_completion_inference", default=True, action='store_true',
+                        help="Use completion during inference to generate missing modality features")
+
     ######################## loss settings ########################
     parser.add_argument("--loss_names", default='mm_sdm+id', help="which loss to use [ 'cmpm', 'itc', 'sdm','pretrain']")
     parser.add_argument("--id_loss_weight", type=float, default=1.0)
