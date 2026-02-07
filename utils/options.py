@@ -28,19 +28,21 @@ def get_args():
     ######################## Missing-aware Robust Encoding settings ########################
     parser.add_argument("--use_missing_aware", default=True, action='store_true',
                         help="Enable Missing-aware Robust Encoding for handling arbitrary missing modalities")
-    parser.add_argument("--modality_dropout_prob", type=float, default=0.5,
-                        help="Probability of dropping each non-RGB modality during training")
-    parser.add_argument("--keep_rgb_prob", type=float, default=0.8,
-                        help="Probability of keeping RGB modality (gallery modality, usually higher)")
-    parser.add_argument("--min_modalities_keep", type=int, default=1,
-                        help="Minimum number of modalities to keep during training")
-    parser.add_argument("--consistency_loss_weight", type=float, default=0.5,
-                        help="Weight for consistency loss between full-modal and subset embeddings")
+    parser.add_argument("--modality_dropout_prob", type=float, default=0.3,
+                        help="Probability of dropping each non-RGB modality during training (reduced from 0.5 to preserve more complete training signal)")
+    parser.add_argument("--keep_rgb_prob", type=float, default=0.9,
+                        help="Probability of keeping RGB modality (gallery modality, increased for stability)")
+    parser.add_argument("--min_modalities_keep", type=int, default=2,
+                        help="Minimum number of modalities to keep during training (increased from 1 for better learning)")
+    parser.add_argument("--consistency_loss_weight", type=float, default=0.1,
+                        help="Weight for consistency loss (reduced from 0.5 to not dominate main losses)")
     parser.add_argument("--consistency_loss_type", type=str, default='cosine',
                         choices=['l2', 'cosine', 'both'],
                         help="Type of consistency loss: 'l2', 'cosine', or 'both'")
     parser.add_argument("--consistency_temperature", type=float, default=0.1,
                         help="Temperature for cosine consistency loss")
+    parser.add_argument("--modality_dropout_warmup_epochs", type=int, default=5,
+                        help="Number of epochs to train without modality dropout (warmup phase)")
 
     ######################## Cross-modal Feature Completion settings ########################
     parser.add_argument("--use_cross_modal_completion", default=True, action='store_true',
@@ -51,15 +53,44 @@ def get_args():
                         help="Number of layers in each completion generator")
     parser.add_argument("--completion_dropout", type=float, default=0.1,
                         help="Dropout rate in completion module")
-    parser.add_argument("--completion_recon_loss_weight", type=float, default=1.0,
-                        help="Weight for reconstruction loss in completion training")
-    parser.add_argument("--completion_cycle_loss_weight", type=float, default=0.5,
-                        help="Weight for cycle consistency loss in completion training")
+    parser.add_argument("--completion_recon_loss_weight", type=float, default=0.3,
+                        help="Weight for reconstruction loss in completion training (reduced from 1.0)")
+    parser.add_argument("--completion_cycle_loss_weight", type=float, default=0.1,
+                        help="Weight for cycle consistency loss in completion training (reduced from 0.5)")
     parser.add_argument("--completion_loss_type", type=str, default='cosine',
                         choices=['l2', 'l1', 'cosine', 'combined'],
                         help="Type of loss for completion: 'l2', 'l1', 'cosine', or 'combined'")
     parser.add_argument("--use_completion_inference", default=True, action='store_true',
                         help="Use completion during inference to generate missing modality features")
+    parser.add_argument("--completion_warmup_epochs", type=int, default=3,
+                        help="Number of epochs before enabling completion loss (let main task converge first)")
+
+    ######################## Reliability-Adaptive Fusion settings ########################
+    parser.add_argument("--use_reliability_fusion", default=True, action='store_true',
+                        help="Enable Reliability-Adaptive Fusion for intelligent modality weighting")
+    parser.add_argument("--reliability_hidden_dim", type=int, default=256,
+                        help="Hidden dimension for reliability estimator network")
+    parser.add_argument("--reliability_num_heads", type=int, default=8,
+                        help="Number of attention heads for fusion transformer")
+    parser.add_argument("--reliability_num_layers", type=int, default=2,
+                        help="Number of transformer layers for fusion refinement")
+    parser.add_argument("--use_quality_indicators", default=True, action='store_true',
+                        help="Use quality indicators (variance, norm, confidence) for reliability estimation")
+    parser.add_argument("--use_transformer_refinement", default=True, action='store_true',
+                        help="Use transformer for post-fusion refinement")
+    parser.add_argument("--fusion_sparsity_weight", type=float, default=0.01,
+                        help="Weight for sparsity regularization loss (reduced from 0.1)")
+    parser.add_argument("--fusion_uncertainty_weight", type=float, default=0.02,
+                        help="Weight for uncertainty-aware loss (reduced from 0.2)")
+    parser.add_argument("--fusion_sparsity_target", type=float, default=0.3,
+                        help="Target sparsity level (0=all equal, 1=single modality)")
+    parser.add_argument("--fusion_sparsity_type", type=str, default='entropy',
+                        choices=['entropy', 'l1', 'gini'],
+                        help="Type of sparsity regularization")
+    parser.add_argument("--use_reliability_fusion_inference", default=False, action='store_true',
+                        help="Use reliability-adaptive fusion during inference (default: False, as fusion is primarily for training regularization)")
+    parser.add_argument("--fusion_warmup_epochs", type=int, default=5,
+                        help="Number of epochs before enabling fusion regularization losses")
 
     ######################## loss settings ########################
     parser.add_argument("--loss_names", default='mm_sdm+id', help="which loss to use [ 'cmpm', 'itc', 'sdm','pretrain']")

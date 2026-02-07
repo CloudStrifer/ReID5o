@@ -525,6 +525,16 @@ def convert_weights(model: nn.Module):
     if hasattr(model, 'completion_trainer'):
         for name, param in model.completion_trainer.named_parameters():
             param.data = param.data.half()
+    
+    # Convert Reliability-Adaptive Fusion module parameters to fp16
+    if hasattr(model, 'reliability_fusion'):
+        for name, param in model.reliability_fusion.named_parameters():
+            param.data = param.data.half()
+    
+    # Also convert reliability_fusion_trainer parameters if it exists
+    if hasattr(model, 'reliability_fusion_trainer'):
+        for name, param in model.reliability_fusion_trainer.named_parameters():
+            param.data = param.data.half()
 
 
 def build_CLIP_from_openai_pretrained(name: str, image_size: Union[int, Tuple[int, int]], stride_size: int, jit: bool = False, download_root: str = None):

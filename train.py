@@ -63,7 +63,8 @@ def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, chec
                 batch[key] = batch[key].to(device)
         
         # Forward pass (modality dropout is handled inside the model)
-        ret = model(batch)
+        # Pass current epoch for warmup control
+        ret = model(batch, current_epoch=epoch)
         
         # Track modality presence if using missing-aware encoding
         if use_missing_aware and 'modality_mask' in ret:
@@ -74,12 +75,38 @@ def train_one_epoch(args, model, train_loader, optimizer, scheduler, epoch, chec
                     modality_presence_counts[modality_names[i]] += 1
             total_batches += 1
         
-        # Aggregate losses
+        # Aggregate losses with warmup handling
         total_loss = 0
         loss_dict = {}
+        
+        # Get warmup epoch settings
+        modality_dropout_warmup = getattr(args, 'modality_dropout_warmup_epochs', 5)
+        completion_warmup = getattr(args, 'completion_warmup_epochs', 3)
+        fusion_warmup = getattr(args, 'fusion_warmup_epochs', 5)
+        
         for loss_name, loss_value in ret.items():
             if 'loss' in loss_name:
-                total_loss += loss_value
+                # Apply warmup: gradually introduce auxiliary losses
+                loss_weight = 1.0
+                
+                # Consistency loss warmup (tied to modality dropout warmup)
+                if 'consistency' in loss_name:
+                    if epoch <= modality_dropout_warmup:
+                        # Gradually ramp up: 0 at epoch 1, full at warmup+1
+                        loss_weight = max(0, (epoch - 1) / modality_dropout_warmup)
+                
+                # Completion losses warmup
+                if 'completion' in loss_name:
+                    if epoch <= completion_warmup:
+                        loss_weight = max(0, (epoch - 1) / completion_warmup)
+                
+                # Fusion regularization losses warmup
+                if 'fusion_sparsity' in loss_name or 'fusion_uncertainty' in loss_name:
+                    if epoch <= fusion_warmup:
+                        loss_weight = max(0, (epoch - 1) / fusion_warmup)
+                
+                weighted_loss = loss_value * loss_weight
+                total_loss += weighted_loss
                 loss_dict[loss_name] = loss_value.item()
                 
                 # Initialize loss meter if not exists
@@ -234,6 +261,22 @@ def main():
         logger.info(f"  Cycle loss weight: {getattr(args, 'completion_cycle_loss_weight', 0.5)}")
         logger.info(f"  Loss type: {getattr(args, 'completion_loss_type', 'cosine')}")
         logger.info(f"  Use during inference: {getattr(args, 'use_completion_inference', True)}")
+        logger.info("=" * 50)
+    
+    # Log Reliability-Adaptive Fusion configuration
+    if getattr(args, 'use_reliability_fusion', False):
+        logger.info("=" * 50)
+        logger.info("Reliability-Adaptive Fusion ENABLED")
+        logger.info(f"  Hidden dim: {getattr(args, 'reliability_hidden_dim', 256)}")
+        logger.info(f"  Num heads: {getattr(args, 'reliability_num_heads', 8)}")
+        logger.info(f"  Num layers: {getattr(args, 'reliability_num_layers', 2)}")
+        logger.info(f"  Use quality indicators: {getattr(args, 'use_quality_indicators', True)}")
+        logger.info(f"  Use transformer refinement: {getattr(args, 'use_transformer_refinement', True)}")
+        logger.info(f"  Sparsity weight: {getattr(args, 'fusion_sparsity_weight', 0.1)}")
+        logger.info(f"  Uncertainty weight: {getattr(args, 'fusion_uncertainty_weight', 0.2)}")
+        logger.info(f"  Sparsity target: {getattr(args, 'fusion_sparsity_target', 0.3)}")
+        logger.info(f"  Sparsity type: {getattr(args, 'fusion_sparsity_type', 'entropy')}")
+        logger.info(f"  Use during inference: {getattr(args, 'use_reliability_fusion_inference', True)}")
         logger.info("=" * 50)
     
     # Build optimizer

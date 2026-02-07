@@ -23,6 +23,11 @@ from .cross_modal_completion import (
     FeatureReconstructionLoss,
     CycleConsistencyLoss
 )
+from .reliability_adaptive_fusion import (
+    ReliabilityAdaptiveFusion,
+    ReliabilityAdaptiveFusionTrainer,
+    AdaptiveFusionInferenceHelper
+)
 
 ######################ReID5o Model########################
 class VisionTokenizer(nn.Module):
@@ -129,6 +134,12 @@ class ReID5oModel(nn.Module):
         self.use_cross_modal_completion = getattr(args, 'use_cross_modal_completion', False)
         if self.use_cross_modal_completion:
             self._init_cross_modal_completion(args)
+        
+        # ============ Reliability-Adaptive Fusion ============
+        # Initialize reliability-adaptive fusion components
+        self.use_reliability_fusion = getattr(args, 'use_reliability_fusion', False)
+        if self.use_reliability_fusion:
+            self._init_reliability_adaptive_fusion(args)
 
     def create_id_classifier(self):
         print('num_classes:{}'.format(self.num_classes))
@@ -182,7 +193,10 @@ class ReID5oModel(nn.Module):
         )
         
         # Weight for consistency loss
-        self.consistency_loss_weight = getattr(args, 'consistency_loss_weight', 0.5)
+        self.consistency_loss_weight = getattr(args, 'consistency_loss_weight', 0.1)
+        
+        # Warmup epoch for modality dropout (train normally first, then introduce dropout)
+        self.modality_dropout_warmup_epochs = getattr(args, 'modality_dropout_warmup_epochs', 5)
         
         print(f'Missing-aware Robust Encoding initialized with:')
         print(f'  - Modality dropout prob: {getattr(args, "modality_dropout_prob", 0.5)}')
@@ -233,6 +247,59 @@ class ReID5oModel(nn.Module):
         print(f'  - Reconstruction loss weight: {self.completion_recon_loss_weight}')
         print(f'  - Cycle loss weight: {self.completion_cycle_loss_weight}')
         print(f'  - Use completion during inference: {self.use_completion_inference}')
+
+    def _init_reliability_adaptive_fusion(self, args):
+        """
+        Initialize Reliability-Adaptive Fusion components.
+        
+        This module dynamically adjusts fusion weights based on modality reliability.
+        It enables intelligent modality selection by:
+        1. Estimating reliability scores for each modality
+        2. Computing quality indicators (variance, norm, confidence)
+        3. Applying adaptive weighting based on reliability
+        4. Using sparsity regularization and uncertainty-aware loss
+        """
+        print('Initializing Reliability-Adaptive Fusion...')
+        
+        # Main fusion module
+        self.reliability_fusion = ReliabilityAdaptiveFusion(
+            embed_dim=self.embed_dim,
+            num_modalities=5,  # RGB, NIR, CP, SK, TEXT
+            hidden_dim=getattr(args, 'reliability_hidden_dim', 256),
+            num_heads=getattr(args, 'reliability_num_heads', 8),
+            num_fusion_layers=getattr(args, 'reliability_num_layers', 2),
+            use_quality_indicators=getattr(args, 'use_quality_indicators', True),
+            use_transformer_refinement=getattr(args, 'use_transformer_refinement', True)
+        )
+        
+        # Training helper with regularization losses
+        self.reliability_fusion_trainer = ReliabilityAdaptiveFusionTrainer(
+            fusion_module=self.reliability_fusion,
+            sparsity_weight=getattr(args, 'fusion_sparsity_weight', 0.1),
+            uncertainty_weight=getattr(args, 'fusion_uncertainty_weight', 0.2),
+            sparsity_target=getattr(args, 'fusion_sparsity_target', 0.3),
+            sparsity_type=getattr(args, 'fusion_sparsity_type', 'entropy')
+        )
+        
+        # Inference helper
+        self.reliability_fusion_inference = AdaptiveFusionInferenceHelper(self.reliability_fusion)
+        
+        # Whether to use reliability fusion during inference
+        self.use_reliability_fusion_inference = getattr(args, 'use_reliability_fusion_inference', True)
+        
+        # Store weights
+        self.fusion_sparsity_weight = getattr(args, 'fusion_sparsity_weight', 0.1)
+        self.fusion_uncertainty_weight = getattr(args, 'fusion_uncertainty_weight', 0.2)
+        
+        print(f'Reliability-Adaptive Fusion initialized with:')
+        print(f'  - Hidden dim: {getattr(args, "reliability_hidden_dim", 256)}')
+        print(f'  - Num heads: {getattr(args, "reliability_num_heads", 8)}')
+        print(f'  - Num layers: {getattr(args, "reliability_num_layers", 2)}')
+        print(f'  - Use quality indicators: {getattr(args, "use_quality_indicators", True)}')
+        print(f'  - Use transformer refinement: {getattr(args, "use_transformer_refinement", True)}')
+        print(f'  - Sparsity weight: {self.fusion_sparsity_weight}')
+        print(f'  - Uncertainty weight: {self.fusion_uncertainty_weight}')
+        print(f'  - Use during inference: {self.use_reliability_fusion_inference}')
 
     def create_mm_fusion_module(self):
         self.cross_attn = nn.MultiheadAttention(self.embed_dim,
@@ -669,6 +736,137 @@ class ReID5oModel(nn.Module):
         modality_names = ['RGB', 'NIR', 'CP', 'SK', 'TEXT']
         return [complete_features.get(name) for name in modality_names]
 
+    def compute_reliability_fusion(self,
+                                    modality_features: Dict[str, torch.Tensor],
+                                    is_generated: Dict[str, bool] = None,
+                                    return_losses: bool = True) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute reliability-adaptive fusion of modality features.
+        
+        This method dynamically weighs modalities based on their estimated reliability,
+        penalizing low-quality or generated (completed) modalities.
+        
+        Args:
+            modality_features: Dict of modality features (real or generated)
+            is_generated: Dict indicating which features are generated (vs real)
+            return_losses: Whether to return regularization losses (for training)
+            
+        Returns:
+            Tuple of:
+                - fused_features: Adaptively fused features [B, embed_dim]
+                - losses: Dict of regularization losses (sparsity, uncertainty)
+        """
+        if not self.use_reliability_fusion:
+            # Fallback to simple averaging
+            available_feats = [feat for feat in modality_features.values() if feat is not None]
+            if len(available_feats) == 0:
+                device = next(self.parameters()).device
+                return torch.zeros(1, self.embed_dim, device=device), {}
+            stacked = torch.stack(available_feats, dim=1)
+            fused = stacked.mean(dim=1)
+            return fused, {}
+        
+        if is_generated is None:
+            is_generated = {name: False for name in modality_features.keys()}
+        
+        if self.training and return_losses:
+            # Use trainer for training with regularization losses
+            # Trainer returns (fused_features, losses, info) - we discard info here
+            fused_features, losses, _ = self.reliability_fusion_trainer(
+                modality_features=modality_features,
+                is_generated=is_generated
+            )
+        else:
+            # Use main module for inference (no losses needed)
+            fused_features, info = self.reliability_fusion(
+                modality_features=modality_features,
+                is_generated=is_generated,
+                return_weights=True
+            )
+            losses = {}
+        
+        return fused_features, losses
+
+    def compute_reliability_fusion_with_completion(self,
+                                                    real_features: Dict[str, torch.Tensor],
+                                                    modality_mask: List[bool],
+                                                    return_losses: bool = True) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """
+        Compute reliability-adaptive fusion, including generated features for missing modalities.
+        
+        This combines cross-modal completion with reliability fusion:
+        1. Generate pseudo-features for missing modalities
+        2. Track which features are generated vs real
+        3. Apply reliability-adaptive fusion with appropriate penalties
+        
+        Args:
+            real_features: Dict of available real features
+            modality_mask: List indicating which modalities are present [RGB, NIR, CP, SK, TEXT]
+            return_losses: Whether to return regularization losses
+            
+        Returns:
+            Tuple of:
+                - fused_features: Adaptively fused features [B, embed_dim]
+                - losses: Dict of regularization losses
+        """
+        modality_names = ['RGB', 'NIR', 'CP', 'SK', 'TEXT']
+        
+        # Track which features are generated
+        is_generated = {name: not present for name, present in zip(modality_names, modality_mask)}
+        
+        # Get complete features (real + generated for missing)
+        if self.use_cross_modal_completion and self.use_completion_inference:
+            complete_features = self.complete_missing_features(real_features, modality_mask)
+        else:
+            # Only use real features
+            complete_features = real_features.copy()
+            # Mark missing as None
+            for name, present in zip(modality_names, modality_mask):
+                if not present:
+                    complete_features[name] = None
+        
+        # Filter out None features for fusion
+        fusion_features = {k: v for k, v in complete_features.items() if v is not None}
+        fusion_is_generated = {k: is_generated[k] for k in fusion_features.keys()}
+        
+        return self.compute_reliability_fusion(
+            modality_features=fusion_features,
+            is_generated=fusion_is_generated,
+            return_losses=return_losses
+        )
+
+    def get_reliability_fused_feature(self,
+                                       modality_features: Dict[str, torch.Tensor],
+                                       is_generated: Dict[str, bool] = None) -> Tuple[torch.Tensor, Dict]:
+        """
+        Get reliability-fused feature with analysis (for inference visualization).
+        
+        Args:
+            modality_features: Dict of modality features
+            is_generated: Dict indicating which features are generated
+            
+        Returns:
+            Tuple of:
+                - fused_features: Adaptively fused features
+                - analysis: Dict with reliability scores, weights, dominant modality
+        """
+        if not self.use_reliability_fusion:
+            available_feats = [feat for feat in modality_features.values() if feat is not None]
+            if len(available_feats) == 0:
+                device = next(self.parameters()).device
+                return torch.zeros(1, self.embed_dim, device=device), {}
+            stacked = torch.stack(available_feats, dim=1)
+            fused = stacked.mean(dim=1)
+            return fused, {'method': 'simple_average'}
+        
+        if is_generated is None:
+            is_generated = {name: False for name in modality_features.keys()}
+        
+        return self.reliability_fusion_inference.fuse_with_analysis(
+            modality_features=modality_features,
+            is_generated=is_generated
+        )
+
     def router_multimodal_embeds(self,rgb,nir,cp,sk,text):
         rgb_embeds = self.encode_rgb_embeds(rgb)
         nir_embeds = self.encode_nir_embeds(nir)
@@ -694,7 +892,7 @@ class ReID5oModel(nn.Module):
 
         return combined_embeds_for_one,combined_embeds_for_two,combined_embeds_for_three,combined_embeds_for_four
 
-    def forward(self, batch, use_modality_dropout=None):
+    def forward(self, batch, use_modality_dropout=None, current_epoch=None):
         ret = dict()
         rgbs = batch['rgbs']
         nirs = batch['nirs']
@@ -705,8 +903,13 @@ class ReID5oModel(nn.Module):
         ret.update({'temperature': 1 / logit_scale})
         
         # Determine whether to use modality dropout
+        # Check warmup: don't use modality dropout during initial epochs
+        modality_dropout_warmup = getattr(self.args, 'modality_dropout_warmup_epochs', 5)
+        in_warmup = current_epoch is not None and current_epoch <= modality_dropout_warmup
+        
         if use_modality_dropout is None:
-            use_modality_dropout = self.training and self.use_missing_aware
+            # Only use modality dropout if: training, missing-aware enabled, and past warmup
+            use_modality_dropout = self.training and self.use_missing_aware and not in_warmup
 
         if 'mm_sdm' in self.current_task:
             # ============ Missing-aware Robust Encoding Integration ============
@@ -847,26 +1050,52 @@ class ReID5oModel(nn.Module):
             # ============ Cross-modal Feature Completion Loss ============
             if self.use_cross_modal_completion and self.training:
                 # Extract CLS features for completion training
-                # Use the full-modal CLS features (from full_cone_embeds if available, else extract fresh)
-                if self.use_missing_aware and use_modality_dropout:
-                    # We already have full-modal features
-                    modality_cls_features = {
-                        'RGB': full_cone_embeds[0],  # full_cone_embeds = [rgb, nir, cp, sk, text_eot]
-                        'NIR': full_cone_embeds[1],
-                        'CP': full_cone_embeds[2],
-                        'SK': full_cone_embeds[3],
-                        'TEXT': full_cone_embeds[4]
-                    }
-                else:
-                    # Extract fresh CLS features
-                    modality_cls_features = self.extract_cls_features(rgbs, nirs, cps, sks, texts)
+                # Use cone_embeds which contains [rgb, nir, cp, sk, text_eot] CLS features
+                modality_cls_features = {
+                    'RGB': cone_embeds[0] if len(cone_embeds) > 0 else rgb_feat,
+                    'NIR': cone_feats[0] if len(cone_feats) > 0 else None,
+                    'CP': cone_feats[1] if len(cone_feats) > 1 else None,
+                    'SK': cone_feats[2] if len(cone_feats) > 2 else None,
+                    'TEXT': cone_feats[3] if len(cone_feats) > 3 else None
+                }
+                # Filter out None values
+                modality_cls_features = {k: v for k, v in modality_cls_features.items() if v is not None}
                 
-                # Compute completion losses (reconstruction + cycle consistency)
-                completion_losses = self.compute_completion_losses(
-                    modality_cls_features, 
-                    compute_cycle=True
-                )
-                ret.update(completion_losses)
+                # Only compute completion losses if we have enough modalities
+                if len(modality_cls_features) >= 2:
+                    # Compute completion losses (reconstruction + cycle consistency)
+                    completion_losses = self.compute_completion_losses(
+                        modality_cls_features, 
+                        compute_cycle=True
+                    )
+                    ret.update(completion_losses)
+            
+            # ============ Reliability-Adaptive Fusion Loss ============
+            if self.use_reliability_fusion and self.training:
+                # Get single modality CLS features for reliability fusion training
+                # Use the features from the main computation path
+                reliability_modality_features = {
+                    'RGB': rgb_feat,
+                    'NIR': cone_feats[0] if len(cone_feats) > 0 else None,
+                    'CP': cone_feats[1] if len(cone_feats) > 1 else None,
+                    'SK': cone_feats[2] if len(cone_feats) > 2 else None,
+                    'TEXT': cone_feats[3] if len(cone_feats) > 3 else None
+                }
+                # Filter out None values
+                reliability_modality_features = {k: v for k, v in reliability_modality_features.items() if v is not None}
+                
+                # Mark all real features as not generated
+                is_generated = {name: False for name in reliability_modality_features.keys()}
+                
+                # Only compute fusion losses if we have enough modalities
+                if len(reliability_modality_features) >= 2:
+                    _, fusion_losses = self.compute_reliability_fusion(
+                        modality_features=reliability_modality_features,
+                        is_generated=is_generated,
+                        return_losses=True
+                    )
+                    # Losses are already named 'fusion_sparsity_loss' and 'fusion_uncertainty_loss'
+                    ret.update(fusion_losses)
 
             if 'id' in self.current_task:
                 all_feats = [rgb_feat] + cone_feats + ctwo_feats + cthree_feats + cfour_feats

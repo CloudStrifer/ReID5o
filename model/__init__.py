@@ -17,3 +17,12 @@ from .cross_modal_completion import (
     ModalityFeatureGenerator,
     CrossAttentionBlock
 )
+from .reliability_adaptive_fusion import (
+    ReliabilityAdaptiveFusion,
+    ReliabilityAdaptiveFusionTrainer,
+    AdaptiveFusionInferenceHelper,
+    ModalityReliabilityEstimator,
+    ModalityQualityIndicators,
+    SparsityRegularization,
+    UncertaintyAwareLoss
+)

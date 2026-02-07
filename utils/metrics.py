@@ -69,7 +69,12 @@ class Evaluator():
         }
 
     def _extract_single_modality_features(self, model, loader, modality):
-        """Extract features for single modality, with optional cross-modal completion"""
+        """Extract features for single modality, with optional cross-modal completion.
+        
+        Note: Reliability-adaptive fusion is NOT used during inference for single modality
+        because it transforms the feature space and would cause mismatch with gallery features.
+        The reliability fusion is used during TRAINING to learn better representations.
+        """
         model = model.eval()
         device = next(model.parameters()).device
         qids, qfeats = [], []
@@ -78,6 +83,9 @@ class Evaluator():
         use_missing_aware = getattr(model, 'use_missing_aware', False)
         use_completion = getattr(model, 'use_cross_modal_completion', False) and \
                          getattr(model, 'use_completion_inference', False)
+        # NOTE: We do NOT use reliability fusion during inference - it's for training only
+        # The fusion module learns to weight modalities during training, but the final
+        # representation should be the standard CLS features for compatibility with gallery
 
         for pid, img in loader:
             img = img.to(device)
@@ -128,7 +136,12 @@ class Evaluator():
         return qids, qfeats
 
     def _extract_multi_modality_features(self, model, loader, modalities):
-        """Extract fused features for multiple modalities"""
+        """Extract fused features for multiple modalities.
+        
+        Note: Reliability-adaptive fusion is NOT used during inference because it transforms
+        the feature space and would cause mismatch with gallery features. The reliability 
+        fusion is used during TRAINING to learn better representations through regularization.
+        """
         model = model.eval()
         device = next(model.parameters()).device
         qids, qfeats = [], []
@@ -168,8 +181,8 @@ class Evaluator():
                             embed = encoder_method(imgs[i])
                             embeds.append(embed.to(dtype=model_dtype))
 
-                # Concatenate all embeddings and fuse
-                # Ensure combined tensor is in model dtype (half precision)
+                # Concatenate all embeddings and fuse using standard mm_fusion
+                # This maintains compatibility with gallery features
                 combined = torch.cat(embeds, dim=1).to(dtype=model_dtype)
                 fusion_feats = model.mm_fusion(combined, combined, combined)
 
