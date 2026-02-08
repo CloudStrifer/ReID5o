@@ -3,14 +3,25 @@ import torch
 import torchvision.transforms as T
 from torch.utils.data import DataLoader
 from .bases import (
-    ImageTextDataset, GalleryDataset, SingleQueryTextDataset, SingleQueryVisionDataset,
+    ImageTextDataset, ImageTextSketchDataset, GalleryDataset, 
+    SingleQueryTextDataset, SingleQueryVisionDataset,
     TwoQueryTextVisionDataset, TwoQueryVisionTextDataset, TwoQueryAllVisionDataset,
     ThreeQueryTextVisionVisionDataset, ThreeQueryVisionVisionTextDataset, ThreeQueryAllVisionDataset,
     FourQueryTextVisionVisionVisionDataset, FourQueryVisionVisionVisionTextDataset
 )
 from .orbench import ORBench
+from .cuhk_pedes import CUHK_PEDES, CUHK_PEDES_ThreeModal
+from .icfg_pedes import ICFG_PEDES, ICFG_PEDES_ThreeModal
 
-__factory = {'ORBench': ORBench}
+__factory = {
+    'ORBench': ORBench,
+    'CUHK-PEDES': CUHK_PEDES,
+    'CUHK_PEDES': CUHK_PEDES,  # Alternative naming
+    'CUHK-PEDES-3Modal': CUHK_PEDES_ThreeModal,
+    'ICFG-PEDES': ICFG_PEDES,
+    'ICFG_PEDES': ICFG_PEDES,  # Alternative naming
+    'ICFG-PEDES-3Modal': ICFG_PEDES_ThreeModal,
+}
 
 
 def build_transforms(img_size=(384, 128), aug=False, is_train=True):
@@ -55,10 +66,16 @@ def collate(batch):
 
     batch_tensor_dict = {}
     for k, v in dict_batch.items():
+        if v[0] is None:
+            continue
         if isinstance(v[0], int):
             batch_tensor_dict.update({k: torch.tensor(v)})
         elif torch.is_tensor(v[0]):
             batch_tensor_dict.update({k: torch.stack(v)})
+        elif isinstance(v[0], dict):
+            # Handle dictionary values like modality_available
+            # Just take the first one since all items in batch should have same structure
+            batch_tensor_dict.update({k: v[0]})
         else:
             raise TypeError(f"Unexpect data type: {type(v[0])} in a batch.")
 
@@ -66,16 +83,25 @@ def collate(batch):
 
 
 def _create_query_datasets(test_queries, val_transforms):
-    """创建所有查询类型的Dataset"""
+    """创建所有查询类型的Dataset
+    
+    Handles both 5-modal (ORBench) and 3-modal (CUHK-PEDES) datasets.
+    For 3-modal datasets, some query combinations will be empty.
+    """
     query_datasets = {}
 
     # 单模态查询
     single_modalities = ['NIR', 'CP', 'SK', 'TEXT']
     for modality in single_modalities:
-        if modality == 'TEXT':
-            query_datasets[modality] = SingleQueryTextDataset(test_queries[modality])
+        query_data = test_queries.get(modality, [])
+        if len(query_data) > 0:
+            if modality == 'TEXT':
+                query_datasets[modality] = SingleQueryTextDataset(query_data)
+            else:
+                query_datasets[modality] = SingleQueryVisionDataset(query_data, val_transforms)
         else:
-            query_datasets[modality] = SingleQueryVisionDataset(test_queries[modality], val_transforms)
+            # Create empty placeholder dataset
+            query_datasets[modality] = None
 
     # 双模态查询
     two_modality_queries = {
@@ -94,7 +120,11 @@ def _create_query_datasets(test_queries, val_transforms):
     }
 
     for query_key, dataset_class in two_modality_queries.items():
-        query_datasets[query_key] = dataset_class(test_queries[query_key], val_transforms)
+        query_data = test_queries.get(query_key, [])
+        if len(query_data) > 0:
+            query_datasets[query_key] = dataset_class(query_data, val_transforms)
+        else:
+            query_datasets[query_key] = None
 
     # 三模态查询
     three_modality_queries = {
@@ -113,7 +143,11 @@ def _create_query_datasets(test_queries, val_transforms):
     }
 
     for query_key, dataset_class in three_modality_queries.items():
-        query_datasets[query_key] = dataset_class(test_queries[query_key], val_transforms)
+        query_data = test_queries.get(query_key, [])
+        if len(query_data) > 0:
+            query_datasets[query_key] = dataset_class(query_data, val_transforms)
+        else:
+            query_datasets[query_key] = None
 
     # 四模态查询
     four_modality_queries = {
@@ -124,22 +158,32 @@ def _create_query_datasets(test_queries, val_transforms):
     }
 
     for query_key, dataset_class in four_modality_queries.items():
-        query_datasets[query_key] = dataset_class(test_queries[query_key], val_transforms)
+        query_data = test_queries.get(query_key, [])
+        if len(query_data) > 0:
+            query_datasets[query_key] = dataset_class(query_data, val_transforms)
+        else:
+            query_datasets[query_key] = None
 
     return query_datasets
 
 
 def _create_dataloaders(query_datasets, test_batch_size, num_workers):
-    """为所有查询Dataset创建DataLoader"""
+    """为所有查询Dataset创建DataLoader
+    
+    Skips None datasets (for 3-modal datasets with missing modality combinations).
+    """
     dataloaders = {}
 
     for query_key, dataset in query_datasets.items():
-        dataloaders[query_key] = DataLoader(
-            dataset,
-            batch_size=test_batch_size,
-            shuffle=False,
-            num_workers=num_workers
-        )
+        if dataset is not None and len(dataset) > 0:
+            dataloaders[query_key] = DataLoader(
+                dataset,
+                batch_size=test_batch_size,
+                shuffle=False,
+                num_workers=num_workers
+            )
+        else:
+            dataloaders[query_key] = None
 
     return dataloaders
 
@@ -150,6 +194,11 @@ def build_dataloader(args, tranforms=None):
     num_workers = args.num_workers
     dataset = __factory[args.dataset_name](root=args.root_dir)
     num_classes = len(dataset.train_id_container)
+    
+    # Detect dataset type for choosing appropriate Dataset class
+    is_three_modal = args.dataset_name in ['CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal', 
+                                            'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
+                                            'RSTPReid', 'RSTPReid-3Modal']
 
     if tranforms:
         val_transforms = tranforms
@@ -161,9 +210,24 @@ def build_dataloader(args, tranforms=None):
             img_size=args.img_size, aug=args.img_aug, is_train=True
         )
 
-        train_set = ImageTextDataset(
-            dataset.train, train_transforms, text_length=args.text_length
-        )
+        # Use appropriate dataset class based on dataset type
+        if is_three_modal:
+            train_set = ImageTextSketchDataset(
+                dataset.train, train_transforms, text_length=args.text_length
+            )
+            # Build caption dictionary for random sampling from the dataset
+            if hasattr(dataset, 'train_annos') and hasattr(dataset, 'imgs_root'):
+                import os.path as op
+                caption_dict = {}
+                for anno in dataset.train_annos:
+                    file_path = anno['file_path'].replace('\\', '/')
+                    rgb_path = op.join(dataset.imgs_root, file_path)
+                    caption_dict[rgb_path] = anno.get('captions', [])
+                train_set.set_caption_dict(caption_dict)
+        else:
+            train_set = ImageTextDataset(
+                dataset.train, train_transforms, text_length=args.text_length
+            )
 
         logger.info('using random sampler')
         train_loader = DataLoader(
