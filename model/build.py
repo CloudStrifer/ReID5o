@@ -126,6 +126,19 @@ class ReID5oModel(nn.Module):
         # ============ Missing-aware Robust Encoding ============
         # Initialize missing-aware encoding components
         self.use_missing_aware = getattr(args, 'use_missing_aware', False)
+        
+        # Check if using 3-modal dataset (CUHK-PEDES, ICFG-PEDES, RSTPReid)
+        # Force NIR and CP to be treated as always missing
+        dataset_name = getattr(args, 'dataset_name', 'ORBench')
+        self.force_missing_nir_cp = getattr(args, 'force_missing_nir_cp', False)
+        three_modal_datasets = [
+            'CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal',
+            'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
+            'RSTPReid', 'RSTPReid-3Modal'
+        ]
+        if dataset_name in three_modal_datasets:
+            self.force_missing_nir_cp = True
+        
         if self.use_missing_aware:
             self._init_missing_aware_encoding(args)
         
@@ -169,6 +182,17 @@ class ReID5oModel(nn.Module):
         self.text_num_tokens = args.text_length  # 77
         
         print(f'Vision tokens: {self.vision_num_tokens}, Text tokens: {self.text_num_tokens}')
+        
+        # Check if using 3-modal dataset (CUHK-PEDES, ICFG-PEDES, RSTPReid)
+        dataset_name = getattr(args, 'dataset_name', 'ORBench')
+        three_modal_datasets = [
+            'CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal',
+            'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
+            'RSTPReid', 'RSTPReid-3Modal'
+        ]
+        if dataset_name in three_modal_datasets:
+            self.force_missing_nir_cp = True
+            print(f'Detected 3-modal dataset ({dataset_name}): forcing NIR and CP as always missing')
         
         # Missing-aware encoder for handling missing modalities
         self.missing_aware_encoder = MissingAwareEncoder(
@@ -529,7 +553,16 @@ class ReID5oModel(nn.Module):
         Returns a list of booleans [RGB, NIR, CP, SK, TEXT] indicating which modalities to use.
         """
         if self.use_missing_aware and self.training:
-            return self.modality_dropout(training=True)
+            mask = self.modality_dropout(training=True)
+            # For 3-modal datasets, always mark NIR and CP as missing
+            if getattr(self, 'force_missing_nir_cp', False):
+                mask[1] = False  # NIR
+                mask[2] = False  # CP
+            return mask
+        
+        # During evaluation, check for 3-modal datasets
+        if getattr(self, 'force_missing_nir_cp', False):
+            return [True, False, False, True, True]  # RGB, SK, TEXT present; NIR, CP missing
         return [True, True, True, True, True]  # All present during evaluation
     
     def router_multimodal_embeds_with_missing_aware(self, rgb, nir, cp, sk, text, modality_mask=None):

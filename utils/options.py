@@ -126,7 +126,12 @@ def get_args():
     parser.add_argument("--power", type=float, default=0.9)
 
     ######################## dataset ########################
-    parser.add_argument("--dataset_name", default="ORBench", help="[ORBench]")
+    parser.add_argument("--dataset_name", default="ORBench", 
+                        help="Dataset name: [ORBench, CUHK-PEDES, ICFG-PEDES, RSTPReid]")
+    parser.add_argument("--num_modalities", type=int, default=5,
+                        help="Number of modalities in dataset: 5 for ORBench, 3 for CUHK-PEDES/ICFG-PEDES/RSTPReid")
+    parser.add_argument("--force_missing_nir_cp", default=False, action='store_true',
+                        help="Force NIR and CP modalities to be treated as always missing (for 3-modal datasets)")
     parser.add_argument("--sampler", default="random", help="choose sampler from [random]")
     parser.add_argument("--num_instance", type=int, default=4)
     parser.add_argument("--root_dir", default="./data")

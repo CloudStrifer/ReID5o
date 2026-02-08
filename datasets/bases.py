@@ -472,3 +472,133 @@ class FourQueryTextVisionVisionVisionDataset(Dataset):
             img2 = self.transform(img2)
             img3 = self.transform(img3)
         return pid, caption, img1, img2, img3
+
+
+class ImageTextSketchDataset(Dataset):
+    """
+    Dataset for 3-modality training: RGB, TEXT, SK (Sketch).
+    
+    This is designed for datasets like CUHK-PEDES that only have
+    image, text, and sketch modalities (no NIR or CP).
+    
+    For missing modalities (NIR, CP), we return the RGB image as placeholder
+    so the model can handle them through missing-aware encoding.
+    """
+    def __init__(self,
+                 dataset,
+                 transform=None,
+                 text_length: int = 77,
+                 truncate: bool = True,
+                 caption_dict=None):
+        self.dataset = list(dataset)  # Make mutable for random sampling
+        self.transform = transform
+        self.text_length = text_length
+        self.truncate = truncate
+        self.tokenizer = SimpleTokenizer()
+        # Optional: dictionary mapping rgb_path to list of captions for random sampling
+        self.caption_dict = caption_dict or {}
+
+    def __len__(self):
+        return len(self.dataset)
+
+    def set_caption_dict(self, caption_dict):
+        """Set the caption dictionary for random sampling."""
+        self.caption_dict = caption_dict
+
+    def random_sampling(self):
+        """
+        For datasets that need random sampling of captions.
+        If caption_dict is set, randomly selects a caption for each sample.
+        """
+        if not self.caption_dict:
+            print("Random Sampling Processing (no-op for 3-modal dataset)...")
+            print("Random Sampling Completed!")
+            return
+        
+        print("Random Sampling Processing...")
+        for i in range(len(self.dataset)):
+            item = list(self.dataset[i])
+            rgb_path = item[2]
+            
+            if rgb_path in self.caption_dict:
+                captions = self.caption_dict[rgb_path]
+                if isinstance(captions, list) and len(captions) > 0:
+                    item[6] = random.choice(captions)
+                elif isinstance(captions, str):
+                    item[6] = captions
+            
+            self.dataset[i] = tuple(item)
+        print("Random Sampling Completed!")
+
+    def _build_random_masked_tokens_and_labels(self, tokens):
+        """
+        Masking some random tokens for Language Model task.
+        """
+        mask = self.tokenizer.encoder["<|mask|>"]
+        token_range = list(range(1, len(self.tokenizer.encoder) - 3))
+
+        labels = []
+        for i, token in enumerate(tokens):
+            if 0 < token < 49405:
+                prob = random.random()
+                if prob < 0.15:
+                    prob /= 0.15
+                    if prob < 0.8:
+                        tokens[i] = mask
+                    elif prob < 0.9:
+                        tokens[i] = random.choice(token_range)
+                    labels.append(token)
+                else:
+                    labels.append(0)
+            else:
+                labels.append(0)
+
+        if all(l == 0 for l in labels):
+            labels[1] = tokens[1]
+            tokens[1] = mask
+
+        return torch.tensor(tokens)
+
+    def __getitem__(self, index):
+        pid, image_id, rgb_path, nir_path, cp_path, sk_path, caption = self.dataset[index]
+        
+        # Load RGB image
+        rgb = read_image(rgb_path)
+        
+        # Load NIR - for 3-modal datasets, this is a placeholder (same as RGB)
+        # The model will handle this through missing-aware encoding
+        nir = read_image(nir_path)
+        
+        # Load CP - for 3-modal datasets, this is a placeholder (same as RGB)
+        cp = read_image(cp_path)
+        
+        # Load Sketch
+        sk = read_image(sk_path)
+        
+        if self.transform is not None:
+            rgb = self.transform(rgb)
+            nir = self.transform(nir)
+            cp = self.transform(cp)
+            sk = self.transform(sk)
+        
+        tokens = tokenize(caption, tokenizer=self.tokenizer, text_length=self.text_length, truncate=self.truncate)
+        tokens = self._build_random_masked_tokens_and_labels(tokens.cpu().numpy())
+        
+        ret = {
+            'pids': pid,
+            'image_ids': image_id,
+            'rgbs': rgb,
+            'nirs': nir,
+            'cps': cp,
+            'sks': sk,
+            'caption_ids': tokens,
+            # Flag to indicate which modalities are real vs placeholder
+            'modality_available': {
+                'RGB': True,
+                'NIR': False,  # Placeholder
+                'CP': False,   # Placeholder
+                'SK': True,
+                'TEXT': True,
+            }
+        }
+        return ret

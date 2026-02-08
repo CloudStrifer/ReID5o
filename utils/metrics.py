@@ -309,21 +309,49 @@ class Evaluator():
 
         # Build summary table
         table = PrettyTable(["task", "R1", "R5", "R10", "mAP", "mINP"])
-        for task_name, _, _ in modality_combinations:
+        
+        # Track which results belong to which modality count
+        one_modal_results = []
+        two_modal_results = []
+        three_modal_results = []
+        four_modal_results = []
+        
+        for task_name, modalities, _ in modality_combinations:
             if task_name in eval_results:
                 result = eval_results[task_name]
                 table.add_row([task_name, result[0], result[1], result[2], result[3], result[4]])
+                
+                # Categorize by modality count
+                modality_count = len(modalities)
+                if modality_count == 1:
+                    one_modal_results.append(result)
+                elif modality_count == 2:
+                    two_modal_results.append(result)
+                elif modality_count == 3:
+                    three_modal_results.append(result)
+                elif modality_count == 4:
+                    four_modal_results.append(result)
 
-        # Calculate averages
-        one_aver = self.table_average_calculation(table, 0, 4)
-        two_aver = self.table_average_calculation(table, 4, 16)
-        three_aver = self.table_average_calculation(table, 16, 28)
-        four_aver = self.table_average_calculation(table, 28, 32)
+        # Calculate averages for each modality group
+        def calculate_average(results):
+            if len(results) == 0:
+                return [0.0, 0.0, 0.0, 0.0, 0.0]
+            avg = [sum(r[i] for r in results) / len(results) for i in range(5)]
+            return avg
+        
+        one_aver = calculate_average(one_modal_results)
+        two_aver = calculate_average(two_modal_results)
+        three_aver = calculate_average(three_modal_results)
+        four_aver = calculate_average(four_modal_results)
 
-        table.add_row(['ONE_AVER', one_aver[0], one_aver[1], one_aver[2], one_aver[3], one_aver[4]])
-        table.add_row(['TWO_AVER', two_aver[0], two_aver[1], two_aver[2], two_aver[3], two_aver[4]])
-        table.add_row(['THREE_AVER', three_aver[0], three_aver[1], three_aver[2], three_aver[3], three_aver[4]])
-        table.add_row(['FOUR_AVER', four_aver[0], four_aver[1], four_aver[2], four_aver[3], four_aver[4]])
+        if len(one_modal_results) > 0:
+            table.add_row(['ONE_AVER', one_aver[0], one_aver[1], one_aver[2], one_aver[3], one_aver[4]])
+        if len(two_modal_results) > 0:
+            table.add_row(['TWO_AVER', two_aver[0], two_aver[1], two_aver[2], two_aver[3], two_aver[4]])
+        if len(three_modal_results) > 0:
+            table.add_row(['THREE_AVER', three_aver[0], three_aver[1], three_aver[2], three_aver[3], three_aver[4]])
+        if len(four_modal_results) > 0:
+            table.add_row(['FOUR_AVER', four_aver[0], four_aver[1], four_aver[2], four_aver[3], four_aver[4]])
 
         # Format table
         for field in ["R1", "R5", "R10", "mAP", "mINP"]:
@@ -331,10 +359,24 @@ class Evaluator():
 
         self.logger.info('\n' + str(table))
 
-        return (one_aver[0] + two_aver[0] + three_aver[0] + four_aver[0]) / 4
+        # Calculate overall average R1 from available modality groups
+        valid_averages = []
+        for aver, results in [(one_aver, one_modal_results), 
+                              (two_aver, two_modal_results),
+                              (three_aver, three_modal_results), 
+                              (four_aver, four_modal_results)]:
+            if len(results) > 0:
+                valid_averages.append(aver[0])
+        
+        if len(valid_averages) > 0:
+            return sum(valid_averages) / len(valid_averages)
+        return 0.0
 
     def table_average_calculation(self, table, first, last):
+        """Legacy method for backward compatibility."""
         selected_rows = table._rows[first:last]
+        if len(selected_rows) == 0:
+            return [0.0, 0.0, 0.0, 0.0, 0.0]
         column_sums = [0] * (len(table.field_names) - 1)
         num_rows = len(selected_rows)
 
