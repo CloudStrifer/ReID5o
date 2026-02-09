@@ -12,6 +12,7 @@ from .bases import (
 from .orbench import ORBench
 from .cuhk_pedes import CUHK_PEDES, CUHK_PEDES_ThreeModal
 from .icfg_pedes import ICFG_PEDES, ICFG_PEDES_ThreeModal
+from .rstp_reid import RSTPReid, RSTPReid_ThreeModal
 
 __factory = {
     'ORBench': ORBench,
@@ -21,6 +22,9 @@ __factory = {
     'ICFG-PEDES': ICFG_PEDES,
     'ICFG_PEDES': ICFG_PEDES,  # Alternative naming
     'ICFG-PEDES-3Modal': ICFG_PEDES_ThreeModal,
+    'RSTPReid': RSTPReid,
+    'RSTP-Reid': RSTPReid,  # Alternative naming
+    'RSTPReid-3Modal': RSTPReid_ThreeModal,
 }
 
 
@@ -198,7 +202,7 @@ def build_dataloader(args, tranforms=None):
     # Detect dataset type for choosing appropriate Dataset class
     is_three_modal = args.dataset_name in ['CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal', 
                                             'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
-                                            'RSTPReid', 'RSTPReid-3Modal']
+                                            'RSTPReid', 'RSTP-Reid', 'RSTPReid-3Modal']
 
     if tranforms:
         val_transforms = tranforms
@@ -220,7 +224,9 @@ def build_dataloader(args, tranforms=None):
                 import os.path as op
                 caption_dict = {}
                 for anno in dataset.train_annos:
-                    file_path = anno['file_path'].replace('\\', '/')
+                    # Handle different key names: 'file_path' for CUHK-PEDES/ICFG-PEDES, 'img_path' for RSTPReid
+                    file_path = anno.get('file_path') or anno.get('img_path', '')
+                    file_path = file_path.replace('\\', '/')
                     rgb_path = op.join(dataset.imgs_root, file_path)
                     caption_dict[rgb_path] = anno.get('captions', [])
                 train_set.set_caption_dict(caption_dict)

@@ -139,6 +139,10 @@ def get_args():
     parser.add_argument("--test_batch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--test", dest='training', default=True, action='store_false')
+    
+    ######################## evaluation ########################
+    parser.add_argument("--compute_mAP", default=False, action='store_true',
+                        help="Compute mAP and mINP during evaluation (slower but more comprehensive)")
 
     args = parser.parse_args()
 

@@ -134,7 +134,7 @@ class ReID5oModel(nn.Module):
         three_modal_datasets = [
             'CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal',
             'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
-            'RSTPReid', 'RSTPReid-3Modal'
+            'RSTPReid', 'RSTP-Reid', 'RSTPReid-3Modal'
         ]
         if dataset_name in three_modal_datasets:
             self.force_missing_nir_cp = True
@@ -188,7 +188,7 @@ class ReID5oModel(nn.Module):
         three_modal_datasets = [
             'CUHK-PEDES', 'CUHK_PEDES', 'CUHK-PEDES-3Modal',
             'ICFG-PEDES', 'ICFG_PEDES', 'ICFG-PEDES-3Modal',
-            'RSTPReid', 'RSTPReid-3Modal'
+            'RSTPReid', 'RSTP-Reid', 'RSTPReid-3Modal'
         ]
         if dataset_name in three_modal_datasets:
             self.force_missing_nir_cp = True

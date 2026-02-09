@@ -73,9 +73,11 @@ if __name__ == '__main__':
     model.to(device)
 
     # 初始化 Evaluator
+    # get_mAP controls whether to compute mAP/mINP (slower but more comprehensive)
+    compute_mAP = getattr(args, 'compute_mAP', False)
     evaluator = Evaluator(
         gallery_loader=test_gallery_loader,
-        get_mAP=False,
+        get_mAP=compute_mAP,
         # 单模态
         nir_query_loader=nir_query_loader,
         cp_query_loader=cp_query_loader,

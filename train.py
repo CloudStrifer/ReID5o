@@ -159,9 +159,11 @@ def validate(args, model, val_loaders, epoch):
     logger.info(f"Validation at Epoch {epoch}")
     
     # Create evaluator with all validation loaders
+    # get_mAP controls whether to compute mAP/mINP (slower but more comprehensive)
+    compute_mAP = getattr(args, 'compute_mAP', False)
     evaluator = Evaluator(
         gallery_loader=val_loaders[0],
-        get_mAP=False,
+        get_mAP=compute_mAP,
         # Single modality
         nir_query_loader=val_loaders[1],
         cp_query_loader=val_loaders[2],

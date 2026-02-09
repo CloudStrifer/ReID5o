@@ -329,7 +329,7 @@ class ICFG_PEDES(BaseDataset):
             rgb_path = op.join(self.imgs_root, file_path)
             sk_path = self._get_sketch_path(file_path)
             if sk_path is None:
-                sk_path = rgb_path  # Fallback
+                sk_path = rgb_path  # Fallback to RGB if no sketch found
             
             # Get caption
             captions = item.get('captions', [])
@@ -341,12 +341,12 @@ class ICFG_PEDES(BaseDataset):
             # TEXT query: (pid, caption)
             queries['TEXT'].append((pid, caption))
             
-            # SK query: (pid, sk_path) - only add once per unique (pid, sk_path)
-            if sk_path != rgb_path:  # Only add if we have actual sketch
-                sk_key = (pid, sk_path)
-                if sk_key not in added_sk_queries:
-                    queries['SK'].append((pid, sk_path))
-                    added_sk_queries.add(sk_key)
+            # SK query: (pid, sk_path) - add once per unique (pid, sk_path)
+            # Always add SK queries regardless of whether it's a real sketch or fallback
+            sk_key = (pid, sk_path)
+            if sk_key not in added_sk_queries:
+                queries['SK'].append((pid, sk_path))
+                added_sk_queries.add(sk_key)
             
             # TEXT+SK: (pid, caption, sk_path)
             queries['TEXT+SK'].append((pid, caption, sk_path))

@@ -1,36 +1,41 @@
 """
-CUHK-PEDES Dataset for Text-Image-Sketch Person Re-identification
+RSTPReid Dataset for Text-Image-Sketch Person Re-identification
 
 This dataset contains:
-- RGB images from CUHK-PEDES (imgs folder)
-- Text captions (caption_all.json)
-- Sketch images (from data/sketch/aliyun/CUHK)
+- RGB images from RSTPReid (imgs folder)
+- Text captions (data_captions.json)
+- Sketch images (from data/sketch/aliyun/RSTPReid/imgs)
 
 The dataset is organized as:
-data/CUHK-PEDES/
+data/RSTPReid/
     imgs/
-        cam_a/
-        cam_b/
-        test_query/
-        train_query/
+        0000_c1_0004.jpg
+        0000_c5_0022.jpg
+        0000_c7_0015.jpg
+        0001_c1_0003.jpg
         ...
-    caption_all.json
+    data_captions.json
 
-caption_all.json format:
+data_captions.json format:
 [
     {
-        "id": 1,
-        "file_path": "test_query/p10376_s14337.jpg",
-        "captions": ["caption1", "caption2"]
+        "id": 0,
+        "img_path": "0000_c14_0031.jpg",
+        "captions": ["caption1", "caption2"],
+        "split": "train"
     },
     ...
 ]
 
+Note: 
+- Each pedestrian has 5 images
+- The first 4 characters of the image name represent the pedestrian ID (e.g., "0000" in "0000_c1_0004.jpg")
+- Each image has 2 text captions
+
 Sketch images are in:
-data/sketch/aliyun/CUHK/
-    cam_a/
-    cam_b/
-    test_query/
+data/sketch/aliyun/RSTPReid/imgs/
+    0000_c1_0004.jpg
+    0000_c5_0022.jpg
     ...
 """
 
@@ -41,9 +46,9 @@ import random
 from .bases import BaseDataset
 
 
-class CUHK_PEDES(BaseDataset):
+class RSTPReid(BaseDataset):
     """
-    CUHK-PEDES Dataset with Sketch modality support.
+    RSTPReid Dataset with Sketch modality support.
     
     This dataset supports 3 modalities:
     - RGB: Original person images
@@ -51,24 +56,30 @@ class CUHK_PEDES(BaseDataset):
     - SK: Sketch images (generated separately)
     
     Note: This dataset does NOT have NIR or CP modalities.
+    
+    Dataset structure:
+    - 4,101 identities
+    - 20,505 images (5 images per identity)
+    - 41,010 captions (2 captions per image)
+    - Split into train/val/test by 'split' field
     """
-    dataset_dir = 'CUHK-PEDES'
-    sketch_dir = 'sketch/aliyun/CUHK'
+    dataset_dir = 'RSTPReid'
+    sketch_dir = 'sketch/aliyun/RSTPReid/imgs'
     
     def __init__(self, root='', verbose=True):
-        super(CUHK_PEDES, self).__init__()
+        super(RSTPReid, self).__init__()
         self.dataset_root = op.join(root, self.dataset_dir)
         self.sketch_root = op.join(root, self.sketch_dir)
         self.imgs_root = op.join(self.dataset_root, 'imgs')
-        self.caption_path = op.join(self.dataset_root, 'caption_all.json')
+        self.anno_path = op.join(self.dataset_root, 'data_captions.json')
         
-        # Load captions
-        self.captions_data = self._load_captions()
+        # Load annotations
+        self.annotations = self._load_annotations()
         
         # Build sketch path mapping
         self.sketch_paths = self._build_sketch_paths()
         
-        # Split data into train/val/test based on file_path prefix
+        # Split data into train/val/test based on 'split' field
         self.train_annos, self.val_annos, self.test_annos = self._split_data()
         
         # Process annotations
@@ -76,94 +87,77 @@ class CUHK_PEDES(BaseDataset):
         self.test, self.test_id_container = self._process_test_anno(self.test_annos)
         
         if verbose:
-            self.logger.info("=> CUHK-PEDES Images and Captions are loaded")
+            self.logger.info("=> RSTPReid Images and Captions are loaded")
             self.show_dataset_info()
     
-    def _load_captions(self):
-        """Load caption_all.json"""
-        with open(self.caption_path, 'r', encoding='utf-8') as f:
+    def _load_annotations(self):
+        """Load data_captions.json"""
+        with open(self.anno_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
         return data
     
     def _build_sketch_paths(self):
-        """Build a mapping from image filename to sketch path"""
+        """
+        Build a mapping from image filename to sketch path.
+        
+        The sketch directory structure is flat (all images in one folder):
+        data/sketch/aliyun/RSTPReid/imgs/
+            0000_c1_0004.jpg
+            0000_c5_0022.jpg
+            ...
+        """
         sketch_paths = {}
         
         if not op.exists(self.sketch_root):
             self.logger.warning(f"Sketch directory not found: {self.sketch_root}")
             return sketch_paths
         
-        for subfolder in os.listdir(self.sketch_root):
-            subfolder_path = op.join(self.sketch_root, subfolder)
-            if not op.isdir(subfolder_path):
-                continue
-            
-            for filename in os.listdir(subfolder_path):
-                if filename.endswith(('.jpg', '.png', '.jpeg')):
-                    # Create key: subfolder/filename (matching file_path structure in caption_all.json)
-                    key = f"{subfolder}/{filename}"
-                    sketch_paths[key] = op.join(subfolder_path, filename)
+        for filename in os.listdir(self.sketch_root):
+            if filename.endswith(('.jpg', '.png', '.jpeg')):
+                # Key is just the filename (matching img_path in JSON)
+                sketch_paths[filename] = op.join(self.sketch_root, filename)
         
         return sketch_paths
     
-    def _get_sketch_path(self, file_path):
+    def _get_sketch_path(self, img_path):
         """
-        Get sketch path for a given image file_path.
+        Get sketch path for a given image filename.
         
         Args:
-            file_path: Path like 'test_query/p10376_s14337.jpg'
+            img_path: Image filename like '0000_c14_0031.jpg'
             
         Returns:
             Sketch path or None if not found
         """
-        # The sketch might be organized differently
-        # Try different matching strategies
+        # Normalize path - extract just the filename
+        filename = op.basename(img_path).replace('\\', '/')
         
-        # Strategy 1: Direct match (subfolder/filename)
-        parts = file_path.replace('\\', '/').split('/')
-        if len(parts) >= 2:
-            subfolder = parts[-2]  # e.g., 'test_query', 'cam_a'
-            filename = parts[-1]   # e.g., 'p10376_s14337.jpg'
-            key = f"{subfolder}/{filename}"
-            if key in self.sketch_paths:
-                return self.sketch_paths[key]
-        
-        # Strategy 2: Just filename match
-        filename = op.basename(file_path)
-        for key, path in self.sketch_paths.items():
-            if key.endswith(filename):
-                return path
+        if filename in self.sketch_paths:
+            return self.sketch_paths[filename]
         
         return None
     
     def _split_data(self):
         """
-        Split data into train/val/test based on file_path prefix.
-        
-        CUHK-PEDES typically uses:
-        - train: images from training set
-        - val: images from validation set  
-        - test_query/test_gallery: images for testing
+        Split data into train/val/test based on 'split' field in JSON.
         """
         train_data = []
         val_data = []
         test_data = []
         
-        for item in self.captions_data:
-            file_path = item['file_path'].replace('\\', '/')
-            
-            # Determine split based on file_path prefix
-            if 'train' in file_path.lower():
+        for item in self.annotations:
+            split = item.get('split', 'train')
+            if split == 'train':
                 train_data.append(item)
-            elif 'val' in file_path.lower():
+            elif split == 'val':
                 val_data.append(item)
-            elif 'test' in file_path.lower():
+            elif split == 'test':
                 test_data.append(item)
             else:
-                # Default to training if unclear
+                # Default to train if unknown
                 train_data.append(item)
         
-        self.logger.info(f"CUHK-PEDES split: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
+        self.logger.info(f"RSTPReid split: train={len(train_data)}, val={len(val_data)}, test={len(test_data)}")
         
         return train_data, val_data, test_data
     
@@ -172,7 +166,8 @@ class CUHK_PEDES(BaseDataset):
         Process annotations for training.
         
         Returns dataset tuples: (pid, image_id, rgb_path, nir_path, cp_path, sk_path, caption)
-        Note: nir_path and cp_path will be set to None/placeholder since CUHK-PEDES doesn't have these modalities.
+        Note: nir_path and cp_path will be set to RGB as placeholder since RSTPReid 
+        doesn't have these modalities.
         """
         pid_container = set()
         dataset = []
@@ -187,24 +182,22 @@ class CUHK_PEDES(BaseDataset):
             pid = pid_map[original_pid]
             pid_container.add(pid)
             
-            # RGB image path - the file_path in json is relative to imgs folder
-            # e.g., "test_query/p10376_s14337.jpg" -> "data/CUHK-PEDES/imgs/test_query/p10376_s14337.jpg"
-            file_path = anno['file_path'].replace('\\', '/')
-            rgb_path = op.join(self.imgs_root, file_path)
+            # RGB image path - img_path is just the filename
+            img_path = anno['img_path'].replace('\\', '/')
+            rgb_path = op.join(self.imgs_root, img_path)
             
             # Sketch path (if available)
-            sk_path = self._get_sketch_path(file_path)
+            sk_path = self._get_sketch_path(img_path)
             if sk_path is None:
                 # If no sketch, use RGB as fallback
                 sk_path = rgb_path
             
             # NIR and CP don't exist for this dataset - use RGB as placeholder
-            # The model will handle missing modalities through the missing-aware encoding
             nir_path = rgb_path  # Placeholder
             cp_path = rgb_path   # Placeholder
             
-            # Get caption (randomly select one from the list)
-            captions = anno['captions']
+            # Get caption (RSTPReid has 2 captions per image, randomly select one for training)
+            captions = anno.get('captions', [])
             if isinstance(captions, list) and len(captions) > 0:
                 caption = random.choice(captions)
             else:
@@ -219,54 +212,39 @@ class CUHK_PEDES(BaseDataset):
         """
         Process test annotations.
         
+        For RSTPReid, we use:
+        - Gallery: All test RGB images
+        - Query: Text descriptions (and sketches)
+        
         Returns dict with gallery and query information.
         """
         pid_container = set()
         
-        # Separate query and gallery based on file_path
-        query_items = []
-        gallery_items = []
-        
-        for item in annos:
-            file_path = item['file_path'].replace('\\', '/')
-            if 'query' in file_path.lower():
-                query_items.append(item)
-            elif 'gallery' in file_path.lower():
-                gallery_items.append(item)
-            else:
-                # Default to gallery
-                gallery_items.append(item)
-        
-        # If no explicit query/gallery split, create one
-        if len(query_items) == 0 and len(gallery_items) > 0:
-            # Use all test data, treating text as query and images as gallery
-            query_items = annos
-            gallery_items = annos
-        
-        # If no explicit gallery, use all items as gallery (text-to-image retrieval)
-        if len(gallery_items) == 0:
-            gallery_items = annos
-        
-        # Build pid mapping
-        all_items = list(set([item['id'] for item in query_items + gallery_items]))
-        unique_pids = sorted(all_items)
+        # Build pid mapping for test set
+        unique_pids = sorted(set(item['id'] for item in annos))
         pid_map = {pid: idx for idx, pid in enumerate(unique_pids)}
         
-        # Process gallery (RGB images)
+        # Process gallery (RGB images) - use all test images
         gallery_paths = []
         gallery_pids = []
         
-        for item in gallery_items:
+        # Track unique images for gallery (avoid duplicates)
+        seen_paths = set()
+        
+        for item in annos:
             pid = pid_map[item['id']]
             pid_container.add(pid)
-            file_path = item['file_path'].replace('\\', '/')
-            img_path = op.join(self.imgs_root, file_path)
-            gallery_paths.append(img_path)
-            gallery_pids.append(pid)
+            img_path = item['img_path'].replace('\\', '/')
+            rgb_path = op.join(self.imgs_root, img_path)
+            
+            # Add to gallery (each unique image once)
+            if rgb_path not in seen_paths:
+                gallery_paths.append(rgb_path)
+                gallery_pids.append(pid)
+                seen_paths.add(rgb_path)
         
         # Process queries for different modality combinations
-        # For CUHK-PEDES with sketch, we have: TEXT, SK, TEXT+SK
-        queries = self._build_query_combinations(query_items, pid_map)
+        queries = self._build_query_combinations(annos, pid_map)
         
         dataset = {
             "gallery_pids": gallery_pids,
@@ -278,14 +256,14 @@ class CUHK_PEDES(BaseDataset):
     
     def _build_query_combinations(self, query_items, pid_map):
         """
-        Build query combinations for CUHK-PEDES.
+        Build query combinations for RSTPReid.
         
-        Since CUHK-PEDES only has RGB, TEXT, and SK, we create queries for:
+        Since RSTPReid only has RGB, TEXT, and SK, we create queries for:
         - TEXT (single modality text query)
         - SK (single modality sketch query)
         - TEXT+SK and SK+TEXT (two modality combinations)
         
-        Note: NIR and CP queries will be empty or use placeholders.
+        Note: NIR and CP queries will be empty.
         """
         queries = {
             # Single modalities (using existing naming for compatibility)
@@ -320,14 +298,14 @@ class CUHK_PEDES(BaseDataset):
             pid = pid_map[item['id']]
             
             # Get paths
-            file_path = item['file_path'].replace('\\', '/')
-            rgb_path = op.join(self.imgs_root, file_path)
-            sk_path = self._get_sketch_path(file_path)
+            img_path = item['img_path'].replace('\\', '/')
+            rgb_path = op.join(self.imgs_root, img_path)
+            sk_path = self._get_sketch_path(img_path)
             if sk_path is None:
                 sk_path = rgb_path  # Fallback to RGB if no sketch found
             
-            # Get caption
-            captions = item['captions']
+            # Get captions - RSTPReid has 2 captions per image
+            captions = item.get('captions', [])
             if isinstance(captions, list) and len(captions) > 0:
                 # Use all captions as separate queries
                 for caption in captions:
@@ -339,44 +317,35 @@ class CUHK_PEDES(BaseDataset):
                     
                     # SK+TEXT: (pid, sk_path, caption)
                     queries['SK+TEXT'].append((pid, sk_path, caption))
-                
-                # SK query: (pid, sk_path) - add once per unique (pid, sk_path)
-                # Always add SK queries regardless of whether it's a real sketch or fallback
-                sk_key = (pid, sk_path)
-                if sk_key not in added_sk_queries:
-                    queries['SK'].append((pid, sk_path))
-                    added_sk_queries.add(sk_key)
             else:
                 caption = captions if isinstance(captions, str) else ""
                 queries['TEXT'].append((pid, caption))
-                
-                # Always add SK query
-                sk_key = (pid, sk_path)
-                if sk_key not in added_sk_queries:
-                    queries['SK'].append((pid, sk_path))
-                    added_sk_queries.add(sk_key)
-                    
                 queries['TEXT+SK'].append((pid, caption, sk_path))
                 queries['SK+TEXT'].append((pid, sk_path, caption))
+            
+            # SK query: (pid, sk_path) - add once per unique (pid, sk_path)
+            # Always add SK queries regardless of whether it's a real sketch or fallback
+            sk_key = (pid, sk_path)
+            if sk_key not in added_sk_queries:
+                queries['SK'].append((pid, sk_path))
+                added_sk_queries.add(sk_key)
         
         return queries
     
     def random_sampling(self):
         """
         Random sampling for training.
-        For CUHK-PEDES, we randomly select a caption for each image.
-        
-        Note: This is called by the training dataset at each epoch.
+        For RSTPReid, we randomly select one of the 2 captions for each image.
         """
         # Build a quick lookup from rgb_path to original annotation
         if not hasattr(self, '_rgb_to_anno'):
             self._rgb_to_anno = {}
             for anno in self.train_annos:
-                file_path = anno['file_path'].replace('\\', '/')
-                rgb_path = op.join(self.imgs_root, file_path)
+                img_path = anno['img_path'].replace('\\', '/')
+                rgb_path = op.join(self.imgs_root, img_path)
                 self._rgb_to_anno[rgb_path] = anno
         
-        print("Random Sampling Processing for CUHK-PEDES...")
+        print("Random Sampling Processing for RSTPReid...")
         train_list = list(self.train)
         for i in range(len(train_list)):
             item = list(train_list[i])
@@ -385,7 +354,7 @@ class CUHK_PEDES(BaseDataset):
             # Find the original annotation
             anno = self._rgb_to_anno.get(rgb_path)
             if anno:
-                captions = anno['captions']
+                captions = anno.get('captions', [])
                 if isinstance(captions, list) and len(captions) > 0:
                     caption = random.choice(captions)
                 else:
@@ -397,11 +366,12 @@ class CUHK_PEDES(BaseDataset):
         print("Random Sampling Completed!")
 
     def show_dataset_info(self):
-        """Override to show CUHK-PEDES specific statistics."""
+        """Override to show RSTPReid specific statistics."""
         from prettytable import PrettyTable
         
         num_train_pids = len(self.train_id_container)
         num_train_imgs = len(self.train_annos)
+        # Count total captions (2 per image)
         num_train_captions = sum(len(anno.get('captions', [])) for anno in self.train_annos)
         
         # Count test queries
@@ -427,9 +397,9 @@ class CUHK_PEDES(BaseDataset):
         self.logger.info(f"Sketch images found: {len(self.sketch_paths)}")
 
 
-class CUHK_PEDES_ThreeModal(CUHK_PEDES):
+class RSTPReid_ThreeModal(RSTPReid):
     """
-    CUHK-PEDES variant that explicitly handles 3 modalities: RGB, TEXT, SK.
+    RSTPReid variant that explicitly handles 3 modalities: RGB, TEXT, SK.
     
     This class provides additional utilities for 3-modal experiments
     where NIR and CP are explicitly marked as missing.
