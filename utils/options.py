@@ -5,7 +5,8 @@ def get_args():
     ######################## general settings ########################
     parser.add_argument("--local_rank", default=0, type=int)
     parser.add_argument("--name", default="ORBench", help="experiment name to save")
-    parser.add_argument("--output_dir", default="logs")
+    parser.add_argument("--output_dir", default="logs",
+                    help="Output directory. When 'logs', auto-generates logs/YYYYMMDD_DATASET_HH_MM (e.g. logs/20260219_ICFG_PEDES_18_42)")
     parser.add_argument("--log_period", default=500)
     parser.add_argument("--eval_period", default=2)
     parser.add_argument("--val_dataset", default="test") # use val set when evaluate, if test use test set

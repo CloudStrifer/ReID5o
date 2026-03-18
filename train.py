@@ -2,6 +2,7 @@ import os
 import os.path as op
 import time
 import logging
+from datetime import datetime
 import torch
 import torch.nn as nn
 
@@ -207,8 +208,23 @@ def validate(args, model, val_loaders, epoch):
     return top1
 
 
+def _get_timestamped_output_dir(base_dir, dataset_name):
+    """Generate a unique output directory: base_dir/YYYYMMDD_DATASET_HH_MM"""
+    # Normalize dataset name: replace hyphens with underscores, uppercase
+    dataset_safe = dataset_name.replace("-", "_").upper()
+    now = datetime.now()
+    timestamp = now.strftime("%Y%m%d") + "_" + dataset_safe + "_" + now.strftime("%H_%M")
+    return op.join(base_dir, timestamp)
+
+
 def main():
     args = get_args()
+    
+    # Auto-generate timestamped output dir when using default "logs"
+    # Format: logs/YYYYMMDD_DATASET_HH_MM (e.g., logs/20260219_ICFG_PEDES_18_42)
+    # This enables parallel runs on multiple GPUs and easy run identification
+    if args.output_dir == "logs":
+        args.output_dir = _get_timestamped_output_dir("logs", args.dataset_name)
     
     # Create output directory
     mkdir_if_missing(args.output_dir)
